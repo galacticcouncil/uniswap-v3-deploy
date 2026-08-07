@@ -1,0 +1,18 @@
+{
+  "name": "uniswap-v3-hydration-launch",
+  "private": true,
+  "description": "Mainnet/lark launch scripts for Uniswap v3 on Hydration: preflight, governance calldata, deploy, pool creation at oracle price, owner ops",
+  "scripts": {
+    "preflight": "node 00-preflight.js",
+    "calldata": "node 01-governance-calldata.js",
+    "deploy": "node 02-deploy.js",
+    "create-pool": "node 03-create-pool.js",
+    "owner-ops": "node 04-owner-ops.js"
+  },
+  "dependencies": {
+    "@polkadot/api": "^14.0.1",
+    "@polkadot/util-crypto": "^13.1.1",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.2"
+  }
+}
