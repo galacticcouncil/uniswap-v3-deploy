@@ -1,9 +1,10 @@
 # Uniswap v3 launch scripts (mainnet / lark)
 
 Production counterpart of `zombienet/`: gets the v3 stack from zero to a live,
-oracle-priced, TWAP-ready pool on a real Hydration network. Liquidity seeding is
-**not** here — that goes through the Gamma UniProxy (`gamma-hypervisor` repo),
-so the ClearingV2 deposit guards apply.
+oracle-priced, TWAP-ready pool on a real Hydration network. **Production**
+liquidity seeding is not here — that goes through the Gamma UniProxy
+(`gamma-hypervisor` repo), so the ClearingV2 deposit guards apply. `06`/`07`
+exist only so a testnet pool has depth to smoke-test against.
 
 ```bash
 cd mainnet
@@ -27,6 +28,45 @@ cp .env.example .env   # fill in DEPLOYER_PK etc.
 On **lark** the governance calls can instead be auto-submitted by
 `hydration-node/scripts/uniswap-v3-lark` (fast-track root referenda); these
 scripts still work there with `NET=lark` and the lark RPC urls.
+
+## Testnet-only extras (lark forks)
+
+`05` refuses to run unless `Parameters::IsTestnet` is true. Together these take a
+fresh lark fork all the way to a traded pool without leaving this directory:
+
+| # | Command | What |
+| --- | --- | --- |
+| 5a | `node 05-testnet-govern.js` | one Root referendum (via `//Alice`): whitelist the deployer for CREATE **and** fund it with gas + both pool assets |
+| 6a | `node 06-seed-position.js [lo hi]` | mint an NPM position (full range by default) so the pool has depth |
+| 7a | `node 07-smoke-test.js` | quote → swap → reverse swap → pool invariants; exits non-zero on any failed check |
+
+### Why 05 is not just `currencies.updateBalance`
+
+Funding is **asset-kind aware**, and that is the whole point of the script:
+
+| kind | example | how it gets funded |
+| --- | --- | --- |
+| `Token` | WETH 20, DOT 5 | `currencies.updateBalance` — Root mints directly |
+| `Erc20` | HOLLAR 222, aDOT 1001 | `dispatcher.dispatchAsTreasury(currencies.transfer(…))` |
+
+Root **cannot mint an `Erc20`-registered asset**: `pallet-currencies` fails with
+`NotSupported` when `BoundErc20::contract_address(id)` is `Some`, because the
+balance lives in an EVM contract rather than in pallet-tokens. So the script
+moves existing supply out of the treasury instead. Any script that assumes
+`updateBalance` works for every asset will silently fail the moment the pair
+includes HOLLAR or an aToken.
+
+### lark gotchas baked into 06/07
+
+- **Approvals use the `2^128-1` sentinel.** The asset precompile's
+  `approve(address,uint256)` reads a u128 `Balance`, so `MaxUint256` overflows it.
+- **Explicit `gasLimit`** (`EVM_GAS_LIMIT`, default 10M) — lark's `estimateGas`
+  under-shoots mint/CREATE.
+- **`CONFIRMATIONS=3`** — lark's stale-pending otherwise shows up as "nonce too low".
+- **No DIA on a fork.** A lark fork has no off-chain price pusher, so its DIA feed
+  is frozen at snapshot time and `03` would abort as stale. Set `PRICE` from the
+  fork's own Omnipool instead (`lrna_per(aDOT) / lrna_per(HOLLAR)`), which is the
+  price an arber on that chain would trade against.
 
 ## Why 03-create-pool.js exists
 
