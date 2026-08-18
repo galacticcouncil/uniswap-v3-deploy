@@ -19,7 +19,7 @@ cp .env.example .env   # fill in DEPLOYER_PK etc.
 | 1 | `node 01-governance-calldata.js whitelist` | prints `evmAccounts.addContractDeployer` calldata → referendum (ControllerOrigin) |
 | 2 | `node 00-preflight.js` | read-only: chain, whitelist, WETH gas, assets, DIA feed |
 | 3 | `node 02-deploy.js` | runs the repo CLI (~14 txs), writes `deployments/<net>.json` |
-| 4 | `node 03-create-pool.js` | create + `initialize` at DIA price + grow observation cardinality |
+| 4 | `node 03-create-pool.js` | assert token ordering, create + `initialize` at DIA price, grow observation cardinality |
 | 5 | *(gamma-hypervisor)* | Hypervisor + UniProxy/ClearingV2, vault seeding |
 | 6 | `node 01-governance-calldata.js set-addresses` | `parameters.setUniswapV3Addresses` calldata → Root referendum (needs PR [#1477](https://github.com/galacticcouncil/hydration-node/pull/1477) runtime) |
 | 7 | `node 04-owner-ops.js transfer-owner <governance-evm>` | hand factory off governance |
@@ -85,11 +85,34 @@ includes HOLLAR or an aToken.
 | Asset | id | precompile |
 | --- | --- | --- |
 | WETH (gas) | 20 | `0x0000000000000000000000000000000100000014` |
-| DOT | 5 | `0x0000000000000000000000000000000100000005` |
+| **aDOT** (launch pair) | **1001** | `0x00000000000000000000000000000001000003e9` |
 | HOLLAR | 222 | `0x00000000000000000000000000000001000000de` |
+| DOT (test pools only) | 5 | `0x0000000000000000000000000000000100000005` |
 
-Decimals differ (DOT 10, HOLLAR 18) — the price math in `lib.js` is
-decimals-aware; `PRICE`/DIA values are always human units (HOLLAR per DOT).
+Decimals differ (aDOT 10, HOLLAR 18) — the price math in `lib.js` is
+decimals-aware; `PRICE`/DIA values are always human units (HOLLAR per aDOT).
+aDOT is 1:1 with DOT (the balance rebases, the price does not), so the DIA
+DOT/USD feed *is* the aDOT price — no index factor.
+
+### Token ordering flips between the test pair and the launch pair
+
+A v3 pool has no "pair". It has `token0` and `token1`, assigned by sorting the
+two raw addresses. On Hydration the address is the asset id sitting in its last
+4 bytes, so that sort is just an **id sort**:
+
+| pair | ids | token0 | token1 |
+| --- | --- | --- | --- |
+| DOT / HOLLAR (test) | 5, 222 | DOT | HOLLAR |
+| **aDOT / HOLLAR (launch)** | 1001, 222 | **HOLLAR** | **aDOT** |
+
+Every tick sign inverts with it, and nothing reverts to tell you — aDOT and DOT
+are both 10 decimals, so a DOT pool looks right until the Hypervisor points at
+it. Any tick-sign assumption validated against a DOT test pool is backwards on
+the launch pool.
+
+`03-create-pool.js` sorts dynamically (correct) **and** asserts the result
+against `EXPECT_TOKEN0` / `EXPECT_TOKEN1` — asset ids, in pool order. Set both
+on mainnet; the script warns loudly if they are unset.
 
 ## Notes
 

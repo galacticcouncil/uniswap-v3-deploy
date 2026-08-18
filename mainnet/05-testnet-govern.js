@@ -161,7 +161,7 @@ async function main() {
   const dest = truncatedAccountId(deployer);
 
   const gasId = Number(env("GAS_ASSET_ID", "20"));
-  const assetA = Number(env("TOKEN_A", "5"));
+  const assetA = Number(env("TOKEN_A", "1001"));
   const assetB = Number(env("TOKEN_B", "222"));
   const fundGas = BigInt(env("FUND_GAS", "100000000000000000000")); // 100 WETH
   const fundA = BigInt(env("FUND_A", "2000000000000000")); //  200k DOT (10 dec)

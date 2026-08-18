@@ -29,7 +29,7 @@ async function main() {
     : warn(`WETH gas balance is 0 — fund asset 20 before deploying`);
 
   for (const [label, id] of [
-    ["TOKEN_A", Number(env("TOKEN_A", "5"))],
+    ["TOKEN_A", Number(env("TOKEN_A", "1001"))],
     ["TOKEN_B", Number(env("TOKEN_B", "222"))],
   ]) {
     const addr = assetToEvmAddress(id);

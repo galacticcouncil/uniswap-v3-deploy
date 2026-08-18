@@ -50,7 +50,7 @@ function main() {
     owner,
     tokens: {
       weth: { assetId: 20, address: WETH9, role: "gas" },
-      tokenA: { assetId: Number(env("TOKEN_A", "5")), address: assetToEvmAddress(Number(env("TOKEN_A", "5"))) },
+      tokenA: { assetId: Number(env("TOKEN_A", "1001")), address: assetToEvmAddress(Number(env("TOKEN_A", "1001"))) },
       tokenB: { assetId: Number(env("TOKEN_B", "222")), address: assetToEvmAddress(Number(env("TOKEN_B", "222"))) },
     },
     uniswap: {

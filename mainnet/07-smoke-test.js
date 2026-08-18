@@ -59,7 +59,7 @@ async function main() {
   const gasLimit = BigInt(env("EVM_GAS_LIMIT", "10000000"));
   const confirmations = Number(env("CONFIRMATIONS", "3"));
 
-  const assetA = Number(env("TOKEN_A", "5"));
+  const assetA = Number(env("TOKEN_A", "1001"));
   const assetB = Number(env("TOKEN_B", "222"));
   const fee = Number(env("FEE", "3000"));
   const addrA = assetToEvmAddress(assetA);

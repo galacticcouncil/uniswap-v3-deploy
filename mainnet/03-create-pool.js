@@ -29,6 +29,35 @@ const {
 
 const divergenceBps = (a, b) => (a > b ? ((a - b) * 10_000n) / b : ((b - a) * 10_000n) / a);
 
+/**
+ * A v3 pool has no "pair" — it has token0/token1, assigned by sorting the two raw
+ * addresses. On Hydration the address is the asset id in its last 4 bytes, so that
+ * sort is an ID sort, and the ordering FLIPS between the DOT test pair and the aDOT
+ * launch pair: 5 < 222 makes DOT token0, but 222 < 1001 makes HOLLAR token0 and aDOT
+ * token1. Every tick sign downstream inverts with it and nothing reverts to say so —
+ * aDOT and DOT are both 10 decimals, so the wrong pool looks right until the
+ * Hypervisor points at it. The sort is dynamic (correct); this pins what we MEANT.
+ */
+function assertOrdering(token0, token1) {
+  const expect0 = env("EXPECT_TOKEN0");
+  const expect1 = env("EXPECT_TOKEN1");
+  if (!expect0 || !expect1) {
+    console.log("  ! EXPECT_TOKEN0/EXPECT_TOKEN1 unset — token ordering NOT asserted");
+    return;
+  }
+  const want0 = assetToEvmAddress(Number(expect0));
+  const want1 = assetToEvmAddress(Number(expect1));
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  if (!same(token0, want0) || !same(token1, want1)) {
+    throw new Error(
+      `token ordering mismatch — pool sorts to token0=${token0} token1=${token1}, ` +
+        `but EXPECT_TOKEN0=${expect0} EXPECT_TOKEN1=${expect1} means ${want0} / ${want1}. ` +
+        `Check TOKEN_A/TOKEN_B (aDOT is 1001, DOT is 5).`
+    );
+  }
+  console.log(`  ordering asserted: token0=asset ${expect0}, token1=asset ${expect1}`);
+}
+
 async function resolvePriceE18(provider) {
   const manual = env("PRICE") ? parsePriceToE18(env("PRICE")) : undefined;
   let dia;
@@ -64,13 +93,14 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(env("EVM_RPC_URL", d.network.evmRpc));
   const wallet = new ethers.Wallet(requireEnv("DEPLOYER_PK"), provider);
 
-  const assetA = Number(env("TOKEN_A", "5"));
+  const assetA = Number(env("TOKEN_A", "1001"));
   const assetB = Number(env("TOKEN_B", "222"));
   const fee = Number(env("FEE", "3000"));
   const addrA = assetToEvmAddress(assetA);
   const addrB = assetToEvmAddress(assetB);
   const [token0, token1] = sortTokens(addrA, addrB);
   const aIsToken0 = token0.toLowerCase() === addrA.toLowerCase();
+  assertOrdering(token0, token1);
 
   const ercA = new ethers.Contract(addrA, ABI.erc20, provider);
   const ercB = new ethers.Contract(addrB, ABI.erc20, provider);
