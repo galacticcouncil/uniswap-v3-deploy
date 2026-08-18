@@ -3,7 +3,8 @@
  * factory owner, the tx is sent; otherwise the raw {to, data} calldata is
  * printed for wrapping in a governance evm.call from the owner account.
  *
- *   node 04-owner-ops.js set-fee-protocol <pool> <n0> <n1>   # n = 0 or 4..10 (fee = 1/n; 4 = 25%)
+ *   node 04-owner-ops.js set-fee-protocol <pool> [n0] [n1] # n = 0 or 4..10 (fee = 1/n; 4 = 25%)
+ *       n0/n1 default to FEE_PROTOCOL (launch value: 4 = 1/4, the maximum)
  *   node 04-owner-ops.js collect-protocol <pool> <recipient>
  *   node 04-owner-ops.js enable-fee-tier <fee> <tickSpacing> # e.g. 100 1
  *   node 04-owner-ops.js transfer-owner <newOwner>           # governance handoff
@@ -29,9 +30,20 @@ async function main() {
   let to, data, desc;
   switch (cmd) {
     case "set-fee-protocol": {
-      const [pool, n0, n1] = [args[0], Number(args[1]), Number(args[2])];
+      // The protocol fee is a DENOMINATOR: bigger number = smaller fee, 4 = 1/4 is
+      // the contract maximum. Default both sides to FEE_PROTOCOL so the launch
+      // value is configuration, not something an operator retypes at the console.
+      const pool = args[0];
+      const dflt = env("FEE_PROTOCOL", "4");
+      const [n0, n1] = [Number(args[1] ?? dflt), Number(args[2] ?? args[1] ?? dflt)];
+      if (!ethers.isAddress(pool)) throw new Error("usage: set-fee-protocol <pool> [n0] [n1]");
       for (const n of [n0, n1]) {
-        if (!(n === 0 || (n >= 4 && n <= 10))) throw new Error("feeProtocol must be 0 or 4..10 (fee = 1/n)");
+        if (!Number.isInteger(n) || !(n === 0 || (n >= 4 && n <= 10))) {
+          throw new Error("feeProtocol must be 0 or 4..10 (fee = 1/n)");
+        }
+      }
+      if (n0 === 0 || n1 === 0) {
+        console.log("  ! feeProtocol 0 = fee OFF. Launch config is 4 4 (1/4, the maximum).");
       }
       [to, data] = [pool, poolIface.encodeFunctionData("setFeeProtocol", [n0, n1])];
       desc = `setFeeProtocol(${n0}, ${n1}) on ${pool} — ${n0 ? `1/${n0}` : "0"} of swap fees to protocol`;

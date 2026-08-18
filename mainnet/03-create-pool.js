@@ -154,7 +154,24 @@ async function main() {
   }
   console.log(`  observation cardinality next: ${next} (~${(next * 6) / 60} min of TWAP at 6s blocks)`);
 
+  // Protocol fee. slot0 packs it as one uint8: token1 in the high nibble, token0
+  // in the low one, and each is a DENOMINATOR (4 = 1/4 = the contract maximum,
+  // 0 = off). Setting it is an owner action, so it cannot happen here — but a
+  // pool that reaches launch still sitting at 0 is the failure we care about.
   const final = await poolC.slot0();
+  const fpWant = Number(env("FEE_PROTOCOL", "4"));
+  const fp0 = Number(final.feeProtocol) & 0x0f;
+  const fp1 = Number(final.feeProtocol) >> 4;
+  const fpDesc = (n) => (n ? `1/${n}` : "OFF");
+  if (fp0 === fpWant && fp1 === fpWant) {
+    console.log(`  protocol fee: ${fpDesc(fp0)} / ${fpDesc(fp1)} (matches FEE_PROTOCOL=${fpWant})`);
+  } else {
+    console.log(
+      `  ! protocol fee is ${fpDesc(fp0)} / ${fpDesc(fp1)}, expected ${fpDesc(fpWant)} on both —` +
+        ` run: node 04-owner-ops.js set-fee-protocol ${pool}`
+    );
+  }
+
   const outPath = saveJson(`deployments/${net}-pools.json`, {
     ...((() => { try { return loadDeployments(`${net}-pools`); } catch { return {}; } })()),
     [`${assetA}-${assetB}-${fee}`]: {
@@ -165,6 +182,7 @@ async function main() {
       tick: Number(final.tick),
       sqrtPriceX96: final.sqrtPriceX96.toString(),
       observationCardinalityNext: next,
+      feeProtocol: [fp0, fp1],
     },
   });
   console.log(`  Wrote ${outPath}`);

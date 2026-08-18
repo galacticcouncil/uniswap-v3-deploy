@@ -23,11 +23,38 @@ cp .env.example .env   # fill in DEPLOYER_PK etc.
 | 5 | *(gamma-hypervisor)* | Hypervisor + UniProxy/ClearingV2, vault seeding |
 | 6 | `node 01-governance-calldata.js set-addresses` | `parameters.setUniswapV3Addresses` calldata → Root referendum (needs PR [#1477](https://github.com/galacticcouncil/hydration-node/pull/1477) runtime) |
 | 7 | `node 04-owner-ops.js transfer-owner <governance-evm>` | hand factory off governance |
-| 8 | `node 04-owner-ops.js set-fee-protocol <pool> 0 0` | later: flip to `4 4` (25%) once organic flow arrives |
+| 8 | `node 04-owner-ops.js set-fee-protocol <pool> 4 4` | **protocol fee ON at launch, at the contract maximum** — see below |
+| 9 | `node 04-owner-ops.js collect-protocol <pool> <recipient>` | sweep accrued protocol fees (repeat as needed) |
 
 On **lark** the governance calls can instead be auto-submitted by
 `hydration-node/scripts/uniswap-v3-lark` (fast-track root referenda); these
 scripts still work there with `NET=lark` and the lark RPC urls.
+
+### Protocol fee: ON at launch, `4 4`
+
+`setFeeProtocol` takes a **denominator**, so a *bigger* number is a *smaller*
+fee. Allowed values are `0` (off) or `4`–`10`; `4` = 1/4 = 25% of the swap fee
+and is the contract maximum, `10` = 1/10 = 10% is the minimum non-zero.
+
+| value | protocol take of the swap fee |
+| --- | --- |
+| `0` | nothing |
+| `10` | 10% (minimum non-zero) |
+| **`4`** | **25% — the maximum, and what we launch with** |
+
+The fee being on from launch is a decision, not a default: the protocol takes a
+real fee on every other venue (Omnipool's take is far higher), and retro-fitting
+one after LPs have priced in zero is a worse conversation than starting with it.
+Launching at the **maximum** rather than 1/10 is a deliberate override of the
+earlier `D2` leaning in the garden ALM spec — that note models a 1/4 skim as
+larger than the vault's gross net margin at arb-only flow, so **watch net markout
+in week 1 and be ready to step down to `10 10`** if organic share stays near zero.
+
+Ordering note: once the factory is governance-owned (step 7, or `OWNER_ADDRESS`
+set at step 3), `04-owner-ops.js` stops sending and prints `{to, data}` instead —
+so steps 8 and 9 are governance `evm.call`s and can ride in the same referendum
+bundle as step 6. Run step 8 **after** the pool exists (step 4); `setFeeProtocol`
+is per-pool, not per-factory.
 
 ## Testnet-only extras (lark forks)
 
