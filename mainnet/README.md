@@ -20,6 +20,7 @@ cp .env.example .env   # fill in DEPLOYER_PK etc.
 | 2 | `node 00-preflight.js` | read-only: chain, whitelist, WETH gas, assets, DIA feed |
 | 3 | `node 02-deploy.js` | runs the repo CLI (~14 txs) **and hands factory + ProxyAdmin to `OWNER_ADDRESS`**, writes `deployments/<net>.json` |
 | 4 | `node 03-create-pool.js` | assert token ordering, create + `initialize` at DIA price, grow observation cardinality |
+| 4b | *(wait)* | **let the pool trade for `TWAP_WINDOW_SECS` before seeding** — see below |
 | 5 | *(gamma-hypervisor)* | Hypervisor + UniProxy/ClearingV2, vault seeding |
 | 6 | `node 01-governance-calldata.js set-addresses` | `parameters.setUniswapV3Addresses` calldata → Root referendum (needs PR [#1477](https://github.com/galacticcouncil/hydration-node/pull/1477) runtime) |
 | 7 | `node 04-owner-ops.js transfer-owner <governance-evm>` | **only if step 3 ran without `OWNER_ADDRESS`** — otherwise verify `factory.owner()` and move on |
@@ -144,12 +145,51 @@ includes HOLLAR or an aToken.
 - A v3 pool starts priceless; `initialize(sqrtPriceX96)` sets the first price.
   A wrong init price is free money for the first arber, so the price comes from
   DIA (with optional manual cross-check that aborts on divergence).
-- The observation ring buffer starts at cardinality 1 → no TWAP → ClearingV2's
-  deposit guard and the keeper's TWAP gates can't function. We grow it to
-  `OBS_CARDINALITY` (600 ≈ 1h at 6s blocks) in chunks, since every new slot is
-  an SSTORE and one big jump can blow the block gas limit.
-- Slots only fill as swaps touch new blocks — expect the full TWAP window to be
-  meaningful only after some trading activity.
+- The observation ring starts at cardinality 1 → no TWAP → ClearingV2's deposit
+  guard and the keeper's TWAP gates can't function. We grow it to
+  `OBS_CARDINALITY` in chunks, since every new slot is an SSTORE and one big
+  jump can blow the block gas limit.
+
+### Sizing the observation ring
+
+The pool writes **at most one observation per block**, and only on blocks that
+traded. With cardinality `C` the oldest observation sits `C - 1` slots behind the
+newest, so a full ring covers `(C - 1) × block_time` — **not** `C × block_time`.
+Past that, `observe()` **reverts with `'OLD'`**; it does not fall back to a
+shorter average.
+
+| cardinality | covers at 6s | vs a 3600s window |
+| --- | --- | --- |
+| 600 | 3594s | **reverts** — short by one slot |
+| 601 | 3600s | exactly, zero headroom |
+| **720** | **4314s** | **+714s (~12 min)** |
+
+`03-create-pool.js` derives the floor as `ceil(TWAP_WINDOW_SECS / BLOCK_TIME_SECS) + 1`
+and refuses to run below it.
+
+**Dense trading is the failure case, not thin trading.** Slots are only spent on
+blocks that traded, so quiet periods stretch the ring further back. The revert
+arrives precisely when the pool starts attracting continuous flow.
+
+`TWAP_WINDOW_SECS` must match ClearingV2's `twapInterval` in `gamma-hypervisor`
+(contract default 3600; the zombienet script sets 60, the lark script 600) and
+the keeper's `TWAP_WINDOW_SECS`. There is no shared constant across the repos —
+reconcile them here before launch.
+
+### Step 4b: the pool must trade before it can be seeded
+
+`increaseObservationCardinalityNext` **reserves** slots; it does not fill them.
+A pool minutes old has one observation, so every `observe()` reverts — and
+ClearingV2 calls `observe()` on **every deposit**. The first Gamma seed deposit
+will fail until the pool has `TWAP_WINDOW_SECS` of trading history behind it.
+
+Two ways through, pick one:
+
+1. Let the pool trade (or arb) for the full window, then seed. Simplest, slowest.
+2. Set ClearingV2 `twapInterval` low for the seed deposit, then raise it to the
+   real window immediately after. Faster, but the seed deposit itself runs
+   without a meaningful TWAP guard — only do this while you are the only
+   depositor.
 
 ## Asset cheat sheet (mainnet)
 

@@ -29,6 +29,12 @@ const {
 
 const divergenceBps = (a, b) => (a > b ? ((a - b) * 10_000n) / b : ((b - a) * 10_000n) / a);
 
+// Seconds of history a FULL ring of `cardinality` slots covers. The oldest entry
+// is `(index + 1) % cardinality` — one step forward in the ring, i.e. C-1 slots
+// behind the newest — so it is (C-1) intervals, not C. That one slot is the
+// difference between 600 (3594s, reverts on a 3600s window) and 601.
+const coverage = (cardinality, blockSecs) => Math.max(0, cardinality - 1) * blockSecs;
+
 /**
  * A v3 pool has no "pair" — it has token0/token1, assigned by sorting the two raw
  * addresses. On Hydration the address is the asset id in its last 4 bytes, so that
@@ -141,10 +147,22 @@ async function main() {
     }
   }
 
-  // Grow the TWAP ring buffer in chunks (each new slot is an SSTORE; one big
-  // jump can exceed the block gas limit).
-  const target = Number(env("OBS_CARDINALITY", "600"));
+  // Grow the TWAP observation ring in chunks (each new slot is an SSTORE; one
+  // big jump can exceed the block gas limit).
+  const target = Number(env("OBS_CARDINALITY", "720"));
   const chunk = Number(env("OBS_CHUNK", "250"));
+  const windowSecs = Number(env("TWAP_WINDOW_SECS", "3600"));
+  const blockSecs = Number(env("BLOCK_TIME_SECS", "6"));
+  const minCardinality = Math.ceil(windowSecs / blockSecs) + 1;
+  if (target < minCardinality) {
+    throw new Error(
+      `OBS_CARDINALITY=${target} is too small for a ${windowSecs}s TWAP at ${blockSecs}s blocks. ` +
+        `A full ring of C slots covers (C-1)*${blockSecs} = ${coverage(target, blockSecs)}s, and observe() ` +
+        `REVERTS ('OLD') past that — it does not return a shorter average. Minimum is ${minCardinality}; ` +
+        `use ${minCardinality + 120} for headroom.`
+    );
+  }
+
   let next = Number(s.observationCardinalityNext);
   while (next < target) {
     const step = Math.min(target, next + chunk);
@@ -152,7 +170,17 @@ async function main() {
     await (await poolC.increaseObservationCardinalityNext(step)).wait();
     next = Number((await poolC.slot0()).observationCardinalityNext);
   }
-  console.log(`  observation cardinality next: ${next} (~${(next * 6) / 60} min of TWAP at 6s blocks)`);
+  const covers = coverage(next, blockSecs);
+  console.log(
+    `  observation cardinality next: ${next} — covers ${covers}s ` +
+      `(${(covers / 60).toFixed(1)} min) at ${blockSecs}s blocks, vs ${windowSecs}s window ` +
+      `(+${covers - windowSecs}s headroom)`
+  );
+  console.log(
+    `  ! slots are RESERVED, not filled — they populate one per block that trades. Until the pool has\n` +
+      `    ${windowSecs}s of trading history, observe(${windowSecs}) reverts and the Gamma seed deposit\n` +
+      `    WILL FAIL. Wait it out, or lower ClearingV2 twapInterval for the seed and raise it after.`
+  );
 
   // Protocol fee. slot0 packs it as one uint8: token1 in the high nibble, token0
   // in the low one, and each is a DENOMINATOR (4 = 1/4 = the contract maximum,

@@ -2,7 +2,8 @@
  * 00-preflight.js — read-only checks before touching mainnet:
  *   EVM RPC + chain id, deployer address, ContractDeployer whitelist,
  *   WETH gas balance, asset registry entries + precompile decimals,
- *   parameters.uniswapV3* storage (post PR #1477), DIA feed freshness.
+ *   parameters.uniswapV3* storage (post PR #1477), DIA feed freshness,
+ *   EMA-oracle tracking for the pair (see `checkOracleTracking` below).
  */
 
 const { ethers } = require("ethers");
@@ -11,6 +12,63 @@ const { env, requireEnv, assetToEvmAddress, ABI } = require("./lib");
 
 const ok = (m) => console.log(`  ✓ ${m}`);
 const warn = (m) => console.log(`  ! ${m}`);
+
+/**
+ * Will the runtime actually record this pool's trades in the EMA oracle?
+ *
+ * A v3 swap reports to the oracle under the `uniswpv3` source, and that record is
+ * what pallet-dca and route-executor's set_route read. But the oracle DISCARDS
+ * entries for pairs it does not track and returns success while doing so — so an
+ * untracked pair produces a pool that trades fine and can never be DCA'd or set as
+ * a default route, with no error, event or log to explain it.
+ *
+ * A pair is tracked when BOTH assets are `isSufficient` in the registry (the
+ * asset-registry rule ignores the source entirely), or when the pair was added
+ * explicitly via `emaOracle.addOracle`. Checking here turns a silent, invisible
+ * failure into a launch-day line item.
+ */
+async function checkOracleTracking(api) {
+  const ids = [Number(env("TOKEN_A", "1001")), Number(env("TOKEN_B", "222"))];
+  const entries = await Promise.all(ids.map((id) => api.query.assetRegistry.assets(id)));
+
+  const sufficiency = entries.map((e, i) => {
+    if (e.isNone) return { id: ids[i], sufficient: false, note: "not registered" };
+    const u = e.unwrap();
+    return { id: ids[i], sufficient: u.isSufficient.isTrue, note: u.symbol.toHuman() };
+  });
+
+  for (const a of sufficiency) {
+    a.sufficient
+      ? ok(`asset ${a.id} (${a.note}) isSufficient`)
+      : warn(`asset ${a.id} (${a.note}) is NOT sufficient`);
+  }
+
+  if (sufficiency.every((a) => a.sufficient)) {
+    return ok("pair is EMA-oracle tracked (both assets sufficient) — v3 trades will be recorded");
+  }
+
+  // Fall back to the explicit whitelist, which is keyed by (source, orderedPair).
+  const [lo, hi] = [...ids].sort((x, y) => x - y);
+  let listed = false;
+  try {
+    const list = await api.query.emaOracle.whitelistedAssets();
+    listed = list.toJSON().some((e) => {
+      const [src, pair] = e;
+      const srcAscii = Buffer.from(String(src).replace(/^0x/, ""), "hex").toString("ascii");
+      return srcAscii === "uniswpv3" && Number(pair[0]) === lo && Number(pair[1]) === hi;
+    });
+  } catch {
+    /* older runtimes may not expose it; the warning below still applies */
+  }
+
+  listed
+    ? ok(`pair explicitly whitelisted via emaOracle.addOracle(uniswpv3, (${lo}, ${hi}))`)
+    : warn(
+        `pair is NOT EMA-oracle tracked — v3 trades will be silently discarded, so DCA and ` +
+          `set_route through this pool will keep failing. Fix: governance call ` +
+          `emaOracle.addOracle("uniswpv3", (${lo}, ${hi})).`
+      );
+}
 
 async function main() {
   const evmRpc = env("EVM_RPC_URL", "https://rpc.hydradx.cloud");
@@ -75,6 +133,8 @@ async function main() {
     } else {
       warn("runtime has no parameters.uniswapV3* storage — PR #1477 not live on this chain");
     }
+
+    await checkOracleTracking(api);
   } finally {
     await api.disconnect();
   }
