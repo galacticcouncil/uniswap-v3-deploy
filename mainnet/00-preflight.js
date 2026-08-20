@@ -8,7 +8,7 @@
 
 const { ethers } = require("ethers");
 const { ApiPromise, WsProvider } = require("@polkadot/api");
-const { env, requireEnv, assetToEvmAddress, ABI } = require("./lib");
+const { env, requireEnv, readFeedE18, assetToEvmAddress, ABI } = require("./lib");
 
 const ok = (m) => console.log(`  ✓ ${m}`);
 const warn = (m) => console.log(`  ! ${m}`);
@@ -100,21 +100,28 @@ async function main() {
     }
   }
 
-  const dia = env("DIA_FEED");
-  if (dia) {
-    try {
-      const feed = new ethers.Contract(dia, ABI.dia, provider);
-      const [value, ts] = await feed.getValue(env("DIA_KEY", "DOT/USD"));
-      const age = Math.floor(Date.now() / 1000) - Number(ts);
-      const stale = age > Number(env("STALE_SECONDS", "3600"));
-      (stale ? warn : ok)(
-        `DIA ${env("DIA_KEY", "DOT/USD")} = ${Number(value) / 1e8} (age ${age}s${stale ? " — STALE" : ""})`
-      );
-    } catch (e) {
-      warn(`DIA feed ${dia} unreadable: ${e.message}`);
+  // Price feeds are Chainlink AggregatorV3, one contract per pair. DIA supplies
+  // the data but does NOT serve it: every Hydration feed reverts on
+  // getValue(string) and answers latestRoundData().
+  const stale = Number(env("STALE_SECONDS", "3600"));
+  for (const [label, key] of [
+    ["PRICE_FEED_A", "PRICE_FEED_A"],
+    ["PRICE_FEED_B", "PRICE_FEED_B"],
+  ]) {
+    const address = env(key);
+    if (!address) {
+      key === "PRICE_FEED_A"
+        ? warn(`${label} not set — 03-create-pool.js will need PRICE`)
+        : ok(`${label} not set — TOKEN_B assumed 1 USD`);
+      continue;
     }
-  } else {
-    warn("DIA_FEED not set — 03-create-pool.js will need PRICE");
+    try {
+      const desc = await new ethers.Contract(address, ABI.aggregatorV3, provider).description();
+      const r = await readFeedE18(ethers, address, provider, stale);
+      ok(`${label} ${address} "${desc}" = ${(Number(r.priceE18) / 1e18).toFixed(6)} USD (age ${r.age}s)`);
+    } catch (e) {
+      warn(`${label} ${address} unreadable: ${e.message}`);
+    }
   }
 
   const api = await ApiPromise.create({ provider: new WsProvider(wsUrl) });

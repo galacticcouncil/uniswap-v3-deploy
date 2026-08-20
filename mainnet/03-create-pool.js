@@ -5,17 +5,24 @@
  * the Gamma UniProxy in gamma-hypervisor.
  *
  * Price resolution (TOKEN_B per 1 TOKEN_A, human units):
- *   - DIA_FEED + DIA_KEY          -> DIA value (1e8). TOKEN_B assumed 1 USD,
- *     or set DIA_KEY_B for a second feed and the ratio is used.
+ *   - PRICE_FEED_A                -> TOKEN_A/USD. TOKEN_B assumed 1 USD, or set
+ *     PRICE_FEED_B for a second feed and the ratio is used.
  *   - PRICE                       -> manual decimal, e.g. 4.2
- *   - both                        -> DIA wins, abort if they diverge more than
- *     MAX_DIVERGENCE_BPS (a wrong init price is free money for the first arber).
+ *   - both                        -> the feed wins, abort if they diverge more
+ *     than MAX_DIVERGENCE_BPS (a wrong init price is free money for the first arber).
+ *
+ * Feeds are Chainlink AggregatorV3, one contract per pair — NOT DIA
+ * getValue(string). DIA supplies the data; the chain serves it through the
+ * AggregatorV3 interface, the same feeds the Aave market reads. Every Hydration
+ * feed reverts on getValue() (verified against mainnet 2026-08-21), so the pair
+ * is selected by ADDRESS and there is no key string.
  */
 
 const { ethers } = require("ethers");
 const {
   env,
   requireEnv,
+  readFeedE18,
   assetToEvmAddress,
   sortTokens,
   parsePriceToE18,
@@ -66,30 +73,35 @@ function assertOrdering(token0, token1) {
 
 async function resolvePriceE18(provider) {
   const manual = env("PRICE") ? parsePriceToE18(env("PRICE")) : undefined;
-  let dia;
-  if (env("DIA_FEED")) {
-    const feed = new ethers.Contract(env("DIA_FEED"), ABI.dia, provider);
+  let oracle;
+  if (env("PRICE_FEED_A")) {
     const stale = Number(env("STALE_SECONDS", "3600"));
-    const read = async (key) => {
-      const [value, ts] = await feed.getValue(key);
-      const age = Math.floor(Date.now() / 1000) - Number(ts);
-      if (age > stale) throw new Error(`DIA ${key} is stale (${age}s old)`);
-      if (value === 0n) throw new Error(`DIA ${key} returned 0`);
-      console.log(`  DIA ${key} = ${Number(value) / 1e8} (age ${age}s)`);
-      return value; // 1e8
+    const read = async (label, address) => {
+      const r = await readFeedE18(ethers, address, provider, stale);
+      console.log(`  ${label} ${address} = ${fmtE18(r.priceE18)} USD (age ${r.age}s, ${r.decimals} dec)`);
+      return r.priceE18;
     };
-    const a = await read(env("DIA_KEY", "DOT/USD"));
-    dia = env("DIA_KEY_B") ? (a * 10n ** 18n) / (await read(env("DIA_KEY_B"))) : a * 10n ** 10n;
+    const a = await read("feed A", env("PRICE_FEED_A"));
+    if (env("PRICE_FEED_B")) {
+      const b = await read("feed B", env("PRICE_FEED_B"));
+      // Both are 1e18 USD prices; TOKEN_B per TOKEN_A is their ratio.
+      oracle = (a * 10n ** 18n) / b;
+    } else {
+      // No feed for TOKEN_B: it is the USD-pegged side (HOLLAR), so A/USD is the
+      // price directly. Document the assumption rather than hiding it.
+      console.log(`  PRICE_FEED_B unset — TOKEN_B assumed 1 USD`);
+      oracle = a;
+    }
   }
-  if (dia !== undefined && manual !== undefined) {
-    const d = divergenceBps(dia, manual);
+  if (oracle !== undefined && manual !== undefined) {
+    const d = divergenceBps(oracle, manual);
     if (d > BigInt(env("MAX_DIVERGENCE_BPS", "200"))) {
-      throw new Error(`DIA (${fmtE18(dia)}) vs PRICE (${fmtE18(manual)}) diverge by ${d} bps — aborting`);
+      throw new Error(`feed (${fmtE18(oracle)}) vs PRICE (${fmtE18(manual)}) diverge by ${d} bps — aborting`);
     }
     console.log(`  cross-check ok (${d} bps)`);
   }
-  const price = dia ?? manual;
-  if (price === undefined) throw new Error("set DIA_FEED and/or PRICE");
+  const price = oracle ?? manual;
+  if (price === undefined) throw new Error("set PRICE_FEED_A and/or PRICE");
   return price;
 }
 

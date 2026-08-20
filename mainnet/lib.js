@@ -110,9 +110,33 @@ const ABI = {
     "function token1() view returns (address)",
     "function fee() view returns (uint24)",
   ],
-  // DIA oracle: price is 1e8, timestamp in seconds.
-  dia: ["function getValue(string) view returns (uint128, uint128)"],
+  // Price feeds on Hydration are Chainlink AggregatorV3, NOT DIA getValue(string).
+  // DIA is the data SOURCE; the chain serves it through the AggregatorV3 interface
+  // (the same feeds the Aave market consumes). Every mainnet feed reverts on
+  // getValue() and answers latestRoundData(), verified 2026-08-21.
+  // One contract per pair, so the pair is chosen by ADDRESS, not by a string key.
+  aggregatorV3: [
+    "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
+    "function decimals() view returns (uint8)",
+    "function description() view returns (string)",
+  ],
 };
+
+/**
+ * Read one AggregatorV3 feed as a 1e18 fixed-point USD price, plus its age.
+ * Throws on a stale, zero or negative answer — callers treat any throw as fatal.
+ */
+async function readFeedE18(ethers, address, provider, staleSeconds) {
+  const feed = new ethers.Contract(address, ABI.aggregatorV3, provider);
+  const [round, decimals] = await Promise.all([feed.latestRoundData(), feed.decimals()]);
+  const answer = round.answer;
+  if (answer <= 0n) throw new Error(`feed ${address} returned ${answer}`);
+  const age = Math.floor(Date.now() / 1000) - Number(round.updatedAt);
+  if (age > staleSeconds) throw new Error(`feed ${address} is stale (${age}s old)`);
+  const dec = Number(decimals);
+  if (dec > 18) throw new Error(`feed ${address} has ${dec} decimals, expected <= 18`);
+  return { priceE18: BigInt(answer) * 10n ** BigInt(18 - dec), age, decimals: dec };
+}
 
 function loadDeployments(net) {
   const p = path.join(__dirname, "deployments", `${net}.json`);
@@ -130,6 +154,7 @@ function saveJson(rel, obj) {
 module.exports = {
   env,
   requireEnv,
+  readFeedE18,
   assetToEvmAddress,
   sortTokens,
   isqrt,
