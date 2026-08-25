@@ -24,9 +24,48 @@ const requireEnv = (name) => {
   return v;
 };
 
-// Asset ERC-20 precompile: 0x…01 ++ assetId (big-endian, last 4 bytes).
+// Asset ERC-20 precompile alias: 0x…01 ++ assetId (big-endian, last 4 bytes).
+// Correct ONLY for `Token`-kind assets. See resolveAssetAddress.
 function assetToEvmAddress(assetId) {
   return "0x" + "0".repeat(30) + "01" + Number(assetId).toString(16).padStart(8, "0");
+}
+
+/**
+ * The EVM address the RUNTIME uses for an asset — which is not always the alias.
+ *
+ * `HydraErc20Mapping::asset_address` is:
+ *
+ *     pallet_asset_registry::contract_address(asset_id)          // Erc20: the real contract
+ *         .unwrap_or_else(|| encode_evm_address(asset_id))       // Token: the alias
+ *
+ * So an `Erc20`-kind asset resolves to the contract recorded in its AccountKey20
+ * location, and the alias is only a fallback. Using the alias for an Erc20 asset
+ * gets two things wrong at once:
+ *
+ *   1. The pool identity. `UniswapV3TradeExecutor::find_pool` resolves through
+ *      the real contract, so a pool created on the alias is a DIFFERENT pool that
+ *      the router can never find.
+ *   2. Transfers. aDOT's alias reverts on `transfer` (verified on lark4 2026-08-24)
+ *      while its contract works, so an alias pool cannot even be seeded.
+ *
+ * It also flips token ordering for aDOT/HOLLAR: by alias HOLLAR sorts first, by
+ * contract aDOT does.
+ */
+async function resolveAssetAddress(api, assetId) {
+  const reg = await api.query.assetRegistry.assets(assetId);
+  if (reg.isNone) throw new Error(`asset ${assetId} is not registered`);
+  if (reg.unwrap().toHuman().assetType !== "Erc20") return assetToEvmAddress(assetId);
+
+  const locQ = api.query.assetRegistry.assetLocations || api.query.assetRegistry.locations;
+  const loc = await locQ(assetId);
+  const m = JSON.stringify(loc.toJSON()).match(/"accountKey20":\{[^}]*"key":"(0x[0-9a-fA-F]{40})"/);
+  if (!m) throw new Error(`asset ${assetId} is Erc20 but has no AccountKey20 location`);
+  return ethersGetAddress(m[1]);
+}
+
+// Checksum without pulling ethers into lib.js's require graph at load time.
+function ethersGetAddress(a) {
+  return require("ethers").getAddress(a);
 }
 
 function sortTokens(a, b) {
@@ -156,6 +195,7 @@ module.exports = {
   requireEnv,
   readFeedE18,
   assetToEvmAddress,
+  resolveAssetAddress,
   sortTokens,
   isqrt,
   parsePriceToE18,

@@ -1,14 +1,14 @@
 /**
  * 00-preflight.js — read-only checks before touching mainnet:
  *   EVM RPC + chain id, deployer address, ContractDeployer whitelist,
- *   WETH gas balance, asset registry entries + precompile decimals,
+ *   WETH gas balance, registry-resolved asset addresses + pool token ordering,
  *   parameters.uniswapV3* storage (post PR #1477), DIA feed freshness,
  *   EMA-oracle tracking for the pair (see `checkOracleTracking` below).
  */
 
 const { ethers } = require("ethers");
 const { ApiPromise, WsProvider } = require("@polkadot/api");
-const { env, requireEnv, readFeedE18, assetToEvmAddress, ABI } = require("./lib");
+const { env, requireEnv, readFeedE18, assetToEvmAddress, resolveAssetAddress, ABI } = require("./lib");
 
 const ok = (m) => console.log(`  ✓ ${m}`);
 const warn = (m) => console.log(`  ! ${m}`);
@@ -70,6 +70,63 @@ async function checkOracleTracking(api) {
       );
 }
 
+/**
+ * Resolve both pool assets the way the RUNTIME does, and report the ordering
+ * `03-create-pool.js` will assert against.
+ *
+ * The alias (`0x…01 ++ id`) answers `symbol()` and `decimals()` for an Erc20-kind
+ * asset too — on mainnet the aDOT alias reports "aDOT", 10 decimals — so checking
+ * it here would print a green tick for an address the pool is never built on. It
+ * has to come from the registry: `Erc20` -> the registered contract, `Token` ->
+ * the alias. Only the contract addresses decide token0/token1, and for the launch
+ * pair the two schemes sort OPPOSITE ways (by alias HOLLAR first, by contract aDOT
+ * first), so this is also the one place an operator can read the correct
+ * EXPECT_TOKEN0/EXPECT_TOKEN1 before `03` aborts on them.
+ */
+async function checkAssetsAndOrdering(api, provider) {
+  const ids = [Number(env("TOKEN_A", "1001")), Number(env("TOKEN_B", "222"))];
+  const addrs = [];
+
+  for (const [label, id] of [
+    ["TOKEN_A", ids[0]],
+    ["TOKEN_B", ids[1]],
+  ]) {
+    let addr;
+    try {
+      addr = await resolveAssetAddress(api, id);
+    } catch (e) {
+      warn(`${label} asset ${id}: ${e.message}`);
+      return;
+    }
+    const alias = assetToEvmAddress(id);
+    const viaContract = addr.toLowerCase() !== alias.toLowerCase();
+    try {
+      const erc = new ethers.Contract(addr, ABI.erc20, provider);
+      const [sym, dec] = await Promise.all([erc.symbol(), erc.decimals()]);
+      ok(`${label} asset ${id} -> ${addr} (${sym}, ${dec} decimals, ${viaContract ? "Erc20 contract" : "Token alias"})`);
+    } catch {
+      warn(`${label} asset ${id} -> ${addr}: not readable`);
+      return;
+    }
+    if (viaContract) console.log(`      alias ${alias} is NOT this asset's address — do not use it`);
+    addrs.push({ id, addr });
+  }
+
+  const [t0, t1] = [...addrs].sort((a, b) => (a.addr.toLowerCase() < b.addr.toLowerCase() ? -1 : 1));
+  ok(`pool ordering: token0 = asset ${t0.id}, token1 = asset ${t1.id}`);
+
+  const [e0, e1] = [env("EXPECT_TOKEN0"), env("EXPECT_TOKEN1")];
+  if (!e0 || !e1) {
+    return warn(`EXPECT_TOKEN0/EXPECT_TOKEN1 unset — set EXPECT_TOKEN0=${t0.id} EXPECT_TOKEN1=${t1.id}`);
+  }
+  Number(e0) === t0.id && Number(e1) === t1.id
+    ? ok(`EXPECT_TOKEN0/EXPECT_TOKEN1 match the chain`)
+    : warn(
+        `EXPECT_TOKEN0=${e0} EXPECT_TOKEN1=${e1} contradicts the chain — 03-create-pool.js will abort. ` +
+          `Correct values: EXPECT_TOKEN0=${t0.id} EXPECT_TOKEN1=${t1.id}`
+      );
+}
+
 async function main() {
   const evmRpc = env("EVM_RPC_URL", "https://rpc.hydradx.cloud");
   const wsUrl = env("WS_URL", "wss://rpc.hydradx.cloud");
@@ -86,19 +143,9 @@ async function main() {
     ? ok(`WETH gas balance ${ethers.formatEther(gas)}`)
     : warn(`WETH gas balance is 0 — fund asset 20 before deploying`);
 
-  for (const [label, id] of [
-    ["TOKEN_A", Number(env("TOKEN_A", "1001"))],
-    ["TOKEN_B", Number(env("TOKEN_B", "222"))],
-  ]) {
-    const addr = assetToEvmAddress(id);
-    try {
-      const erc = new ethers.Contract(addr, ABI.erc20, provider);
-      const [sym, dec] = await Promise.all([erc.symbol(), erc.decimals()]);
-      ok(`${label} asset ${id} -> ${addr} (${sym}, ${dec} decimals)`);
-    } catch {
-      warn(`${label} asset ${id} -> ${addr}: precompile not readable`);
-    }
-  }
+  // Asset addresses are resolved further down, once the substrate API is up:
+  // an Erc20-kind asset lives at its registered contract, not at the alias, and
+  // only the registry knows which kind it is.
 
   // Price feeds are Chainlink AggregatorV3, one contract per pair. DIA supplies
   // the data but does NOT serve it: every Hydration feed reverts on
@@ -141,6 +188,7 @@ async function main() {
       warn("runtime has no parameters.uniswapV3* storage — PR #1477 not live on this chain");
     }
 
+    await checkAssetsAndOrdering(api, provider);
     await checkOracleTracking(api);
   } finally {
     await api.disconnect();

@@ -19,11 +19,12 @@
  */
 
 const { ethers } = require("ethers");
+const { ApiPromise, WsProvider } = require("@polkadot/api");
 const {
   env,
   requireEnv,
   readFeedE18,
-  assetToEvmAddress,
+  resolveAssetAddress,
   sortTokens,
   parsePriceToE18,
   sqrtPriceX96FromPrice,
@@ -34,7 +35,16 @@ const {
   saveJson,
 } = require("./lib");
 
-const divergenceBps = (a, b) => (a > b ? ((a - b) * 10_000n) / b : ((b - a) * 10_000n) / a);
+// Relative gap between two 1e18 prices, in bps. Both must be positive: the
+// smaller one is the divisor, so a zero PRICE alongside a live feed would
+// otherwise throw a bare `RangeError: Division by zero` instead of saying which
+// input was bad.
+const divergenceBps = (a, b) => {
+  if (a <= 0n || b <= 0n) {
+    throw new Error(`cannot compare prices ${fmtE18(a)} and ${fmtE18(b)} — both must be positive`);
+  }
+  return a > b ? ((a - b) * 10_000n) / b : ((b - a) * 10_000n) / a;
+};
 
 // Seconds of history a FULL ring of `cardinality` slots covers. The oldest entry
 // is `(index + 1) % cardinality` — one step forward in the ring, i.e. C-1 slots
@@ -51,15 +61,13 @@ const coverage = (cardinality, blockSecs) => Math.max(0, cardinality - 1) * bloc
  * aDOT and DOT are both 10 decimals, so the wrong pool looks right until the
  * Hypervisor points at it. The sort is dynamic (correct); this pins what we MEANT.
  */
-function assertOrdering(token0, token1) {
+function assertOrdering(token0, token1, want0, want1) {
   const expect0 = env("EXPECT_TOKEN0");
   const expect1 = env("EXPECT_TOKEN1");
   if (!expect0 || !expect1) {
     console.log("  ! EXPECT_TOKEN0/EXPECT_TOKEN1 unset — token ordering NOT asserted");
     return;
   }
-  const want0 = assetToEvmAddress(Number(expect0));
-  const want1 = assetToEvmAddress(Number(expect1));
   const same = (a, b) => a.toLowerCase() === b.toLowerCase();
   if (!same(token0, want0) || !same(token1, want1)) {
     throw new Error(
@@ -114,11 +122,30 @@ async function main() {
   const assetA = Number(env("TOKEN_A", "1001"));
   const assetB = Number(env("TOKEN_B", "222"));
   const fee = Number(env("FEE", "3000"));
-  const addrA = assetToEvmAddress(assetA);
-  const addrB = assetToEvmAddress(assetB);
+  // Resolve the way the RUNTIME does: an Erc20-kind asset (aDOT, HOLLAR) lives at
+  // its registered contract, not at the 0x…01++id alias. Using the alias would
+  // create a pool the router's find_pool can never resolve — and for aDOT the
+  // alias reverts on transfer, so it could not be seeded either.
+  const sub = await ApiPromise.create({ provider: new WsProvider(env("WS_URL", "wss://rpc.hydradx.cloud"), 3000) });
+  let addrA, addrB, wantAddr0, wantAddr1;
+  try {
+    [addrA, addrB] = await Promise.all([resolveAssetAddress(sub, assetA), resolveAssetAddress(sub, assetB)]);
+    // Resolve the expectation the same way, so the assertion compares like with like.
+    const e0 = env("EXPECT_TOKEN0"), e1 = env("EXPECT_TOKEN1");
+    if (e0 && e1) {
+      [wantAddr0, wantAddr1] = await Promise.all([
+        resolveAssetAddress(sub, Number(e0)),
+        resolveAssetAddress(sub, Number(e1)),
+      ]);
+    }
+  } finally {
+    await sub.disconnect();
+  }
+  console.log(`  token addresses: ${assetA} -> ${addrA}`);
+  console.log(`                   ${assetB} -> ${addrB}`);
   const [token0, token1] = sortTokens(addrA, addrB);
   const aIsToken0 = token0.toLowerCase() === addrA.toLowerCase();
-  assertOrdering(token0, token1);
+  assertOrdering(token0, token1, wantAddr0, wantAddr1);
 
   const ercA = new ethers.Contract(addrA, ABI.erc20, provider);
   const ercB = new ethers.Contract(addrB, ABI.erc20, provider);
@@ -161,10 +188,10 @@ async function main() {
 
   // Grow the TWAP observation ring in chunks (each new slot is an SSTORE; one
   // big jump can exceed the block gas limit).
-  const target = Number(env("OBS_CARDINALITY", "720"));
+  const target = Number(env("OBS_CARDINALITY", "2000"));
   const chunk = Number(env("OBS_CHUNK", "250"));
   const windowSecs = Number(env("TWAP_WINDOW_SECS", "3600"));
-  const blockSecs = Number(env("BLOCK_TIME_SECS", "6"));
+  const blockSecs = Number(env("BLOCK_TIME_SECS", "2"));
   const minCardinality = Math.ceil(windowSecs / blockSecs) + 1;
   if (target < minCardinality) {
     throw new Error(

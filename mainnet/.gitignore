@@ -1,3 +1,6 @@
-.env
+# Every .env variant — real runs carry DEPLOYER_PK. `.env` alone missed
+# backups like .env.backup-dothollar and .env.lark4.
+.env*
+!.env.example
 node_modules/
 deployments/

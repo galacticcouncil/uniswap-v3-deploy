@@ -94,8 +94,12 @@ function main() {
     owner,
     tokens: {
       weth: { assetId: 20, address: WETH9, role: "gas" },
-      tokenA: { assetId: Number(env("TOKEN_A", "1001")), address: assetToEvmAddress(Number(env("TOKEN_A", "1001"))) },
-      tokenB: { assetId: Number(env("TOKEN_B", "222")), address: assetToEvmAddress(Number(env("TOKEN_B", "222"))) },
+      // Recorded as the ALIAS. For an Erc20-kind asset the runtime uses the
+      // registered contract instead (see lib.js resolveAssetAddress), so treat
+      // these as identifiers, not as the addresses a pool is built on —
+      // 03-create-pool.js resolves those from the registry.
+      tokenA: { assetId: Number(env("TOKEN_A", "1001")), alias: assetToEvmAddress(Number(env("TOKEN_A", "1001"))) },
+      tokenB: { assetId: Number(env("TOKEN_B", "222")), alias: assetToEvmAddress(Number(env("TOKEN_B", "222"))) },
     },
     uniswap: {
       v3CoreFactory: s.v3CoreFactoryAddress,

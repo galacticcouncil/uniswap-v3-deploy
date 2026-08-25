@@ -158,14 +158,20 @@ newest, so a full ring covers `(C - 1) × block_time` — **not** `C × block_ti
 Past that, `observe()` **reverts with `'OLD'`**; it does not fall back to a
 shorter average.
 
-| cardinality | covers at 6s | vs a 3600s window |
+Hydration runs **2-second** blocks (`MILLISECS_PER_BLOCK = 2_000`, since the
+`SetTwoSecBlocksSince` migration). It used to be 6s, so any ring sized "for 1
+hour at 6s blocks" is now three times too small.
+
+| cardinality | covers at 2s | vs a 3600s window |
 | --- | --- | --- |
-| 600 | 3594s | **reverts** — short by one slot |
-| 601 | 3600s | exactly, zero headroom |
-| **720** | **4314s** | **+714s (~12 min)** |
+| 720 | 1438s | **reverts** — sized for the old 6s blocks |
+| 1800 | 3598s | **reverts** — short by one slot |
+| 1801 | 3600s | exactly, zero headroom |
+| **2000** | **3998s** | **+398s (~6.6 min)** |
 
 `03-create-pool.js` derives the floor as `ceil(TWAP_WINDOW_SECS / BLOCK_TIME_SECS) + 1`
-and refuses to run below it.
+and refuses to run below it — which is how the block-time change was caught: the
+old 720 now fails with *"min 1801"* instead of quietly under-sizing the ring.
 
 **Dense trading is the failure case, not thin trading.** Slots are only spent on
 blocks that traded, so quiet periods stretch the ring further back. The revert
@@ -193,12 +199,20 @@ Two ways through, pick one:
 
 ## Asset cheat sheet (mainnet)
 
-| Asset | id | precompile |
-| --- | --- | --- |
-| WETH (gas) | 20 | `0x0000000000000000000000000000000100000014` |
-| **aDOT** (launch pair) | **1001** | `0x00000000000000000000000000000001000003e9` |
-| HOLLAR | 222 | `0x00000000000000000000000000000001000000de` |
-| DOT (test pools only) | 5 | `0x0000000000000000000000000000000100000005` |
+| Asset | id | kind | address the runtime uses |
+| --- | --- | --- | --- |
+| WETH (gas) | 20 | `Token` | `0x0000000000000000000000000000000100000014` (alias) |
+| **aDOT** (launch pair) | **1001** | `Erc20` | **`0x02639ec01313c8775Fae74F2dad1118c8A8a86dA`** (contract) |
+| **HOLLAR** (launch pair) | **222** | `Erc20` | **`0x531a654d1696ED52e7275A8cede955E82620f99a`** (contract) |
+| DOT (test pools only) | 5 | `Token` | `0x0000000000000000000000000000000100000005` (alias) |
+
+> Both sides of the launch pair are `Erc20`, so **neither uses its `0x…01 ++ id`
+> alias**. The aliases (`…03e9` for aDOT, `…00de` for HOLLAR) still answer
+> `symbol()` and `decimals()`, so they look like working tokens — but a pool built
+> on them is a different pool the router can never resolve, and aDOT's alias
+> reverts on `transfer`, so it could not be seeded either. Every script resolves
+> through the registry (`lib.js` `resolveAssetAddress`); `00-preflight.js` prints
+> what it resolved and flags the alias explicitly. Never paste an alias by hand.
 
 Decimals differ (aDOT 10, HOLLAR 18) — the price math in `lib.js` is
 decimals-aware; `PRICE`/DIA values are always human units (HOLLAR per aDOT).
@@ -208,13 +222,26 @@ DOT/USD feed *is* the aDOT price — no index factor.
 ### Token ordering flips between the test pair and the launch pair
 
 A v3 pool has no "pair". It has `token0` and `token1`, assigned by sorting the
-two raw addresses. On Hydration the address is the asset id sitting in its last
-4 bytes, so that sort is just an **id sort**:
+two raw addresses — and *which* address depends on the asset kind:
 
-| pair | ids | token0 | token1 |
-| --- | --- | --- | --- |
-| DOT / HOLLAR (test) | 5, 222 | DOT | HOLLAR |
-| **aDOT / HOLLAR (launch)** | 1001, 222 | **HOLLAR** | **aDOT** |
+| asset kind | address the runtime uses |
+| --- | --- |
+| `Token` (DOT, WETH) | the `0x…01 ++ id` precompile alias |
+| `Erc20` (aDOT, HOLLAR) | the **registered contract** from its AccountKey20 location |
+
+That is `HydraErc20Mapping::asset_address`: `contract_address(id)` first, alias
+only as a fallback. Both sides of the launch pair are `Erc20`, so both use
+contracts — and the two schemes sort **opposite** ways:
+
+| scheme | token0 | token1 |
+| --- | --- | --- |
+| aliases `0x…00de` / `0x…03e9` | HOLLAR | aDOT |
+| **contracts** `0x531a…` / `0x0263…` | **aDOT** | **HOLLAR** |
+
+Verified against mainnet 2026-08-24. Using the alias for an `Erc20` asset gets
+two things wrong at once: it builds a pool `find_pool` can never resolve, and
+aDOT's alias **reverts on transfer**, so the pool cannot even be seeded.
+`lib.js resolveAssetAddress` is the single place that decides this.
 
 Every tick sign inverts with it, and nothing reverts to tell you — aDOT and DOT
 are both 10 decimals, so a DOT pool looks right until the Hypervisor points at

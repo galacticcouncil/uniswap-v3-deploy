@@ -16,7 +16,8 @@
  */
 
 const { ethers } = require("ethers");
-const { env, requireEnv, assetToEvmAddress, sortTokens, ABI, loadDeployments, saveJson } = require("./lib");
+const { ApiPromise, WsProvider } = require("@polkadot/api");
+const { env, requireEnv, resolveAssetAddress, sortTokens, ABI, loadDeployments, saveJson } = require("./lib");
 
 const U128_MAX = (1n << 128n) - 1n;
 const MIN_TICK = -887272;
@@ -42,8 +43,16 @@ async function main() {
   const assetA = Number(env("TOKEN_A", "1001"));
   const assetB = Number(env("TOKEN_B", "222"));
   const fee = Number(env("FEE", "3000"));
-  const addrA = assetToEvmAddress(assetA);
-  const addrB = assetToEvmAddress(assetB);
+  // An Erc20-kind asset (aDOT, HOLLAR) lives at its registered contract, not at
+  // the 0x…01++id alias — matching HydraErc20Mapping::asset_address. The alias
+  // resolves to a different pool, and aDOT's alias reverts on transfer.
+  const sub = await ApiPromise.create({ provider: new WsProvider(env("WS_URL", "wss://rpc.hydradx.cloud"), 3000) });
+  let addrA, addrB;
+  try {
+    [addrA, addrB] = await Promise.all([resolveAssetAddress(sub, assetA), resolveAssetAddress(sub, assetB)]);
+  } finally {
+    await sub.disconnect();
+  }
   const [token0, token1] = sortTokens(addrA, addrB);
   const aIsToken0 = token0.toLowerCase() === addrA.toLowerCase();
 
