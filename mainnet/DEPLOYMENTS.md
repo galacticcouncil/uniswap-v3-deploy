@@ -5,7 +5,14 @@
 > unset there, so the router venue is inert and there is nothing for a front end to point at.
 > Everything below exists only on the lark4 fork.
 
-Verified on-chain at lark4 block 403,757 — all contracts hold code.
+**Rebuilt from scratch 2026-08-26.** The fork was reset to a fresh mainnet snapshot and the
+whole stack redeployed, so every address below was re-derived — the v3 addresses are byte-for-byte
+the same as the previous build (the deploy runs from deployer nonce 0, so CREATE is deterministic),
+but **every Gamma address changed**. The pool address is unchanged too, since it is CREATE2 over
+(token0, token1, fee) from the same factory.
+
+Verified on-chain at lark4 block 730 — all 19 addresses below hold code and match the generated
+artifacts; smoke test 14/14; a deposit through UniProxy minted shares.
 
 | | |
 | --- | --- |
@@ -42,14 +49,16 @@ The router's WETH9 is the asset-20 gas precompile. Native-value paths — `unwra
 
 **4. Vault deposits go through UniProxy, never the Hypervisor directly.**
 UniProxy is what applies the ClearingV2 guards, and ClearingV2 calls `observe()` on every
-deposit against a 3600 s TWAP window.
+deposit against the configured TWAP window (currently 600 s, target 3600 s — see below).
 
 ---
 
 ## The pool
 
-aDOT/HOLLAR, 0.3% tier. The observation ring is fully grown, so `observe()` over the full
-hour works.
+aDOT/HOLLAR, 0.3% tier. The observation ring is **sized** for a full hour (cardinality 2000),
+but sizing is not history: the slots are reserved, and one is filled per block that trades. So
+`observe(w)` still reverts with `OLD` for any `w` longer than the pool has actually been running,
+however large the ring is. That is why `twapInterval` starts at 600 s — see the Gamma section.
 
 | | Address |
 | --- | --- |
@@ -61,10 +70,17 @@ hour works.
 | --- | --- |
 | Fee tier | `3000` |
 | Tick spacing | `60` |
-| Current tick | `182854` |
+| Initialised at | `0.900622` HOLLAR per aDOT |
+| Current tick | `183168` |
 | Observation cardinality | `2000 / 2000` |
-| Liquidity | `18683682720491696` |
-| Protocol fee | `0` (off on the fork; launches at `4 4`) |
+| Liquidity | `18980229243982476` |
+| Protocol fee | `4 / 4` — ON, 25% of swap fees (`slot0.feeProtocol = 68`) |
+
+The init price was derived from **the fork's own Omnipool**, not the price feed:
+`lrna_per(aDOT) / lrna_per(HOLLAR)` = `0.15102427 / 0.16768871` = `0.900622`. A fork has no
+off-chain DIA pusher, so its feed is frozen at snapshot time and pricing the pool off it would
+hand the first arber a free round trip against the Omnipool. The frozen feed was read anyway as
+a cross-check and agreed to **49 bps**.
 
 ---
 
@@ -92,21 +108,31 @@ governance surfaces, listed so nothing gets guessed at.
 
 | Contract | Address |
 | --- | --- |
-| **UniProxy** — deposit entry point | `0x36C02dA8a0983159322a80FFE9F24b1acfF8B570` |
-| **Hypervisor** — vault / LP token | `0x7Ee5e4aCE3bdcEf233a5831d0494252AD6c7Cb21` |
-| ClearingV2 — deposit guards | `0x5eb3Bc0a489C5A8288765d2336659EbCA68FCd00` |
-| HypervisorFactory | `0x8f86403A4DE0BB5791fa46B8e795C547942fE4Cf` |
-| Admin | `0x5f3f1dBD7B74C6B46e8c44f98792A1dAf8d69154` |
-| RebalanceProxy | `0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575` |
+| **UniProxy** — deposit entry point | `0x851356ae760d987E095750cCeb3bC6014560891C` |
+| **Hypervisor** — vault / LP token | `0xFa45C2f07Cf62C543F2247E9e5B5a6acBEc762ae` |
+| ClearingV2 — deposit guards | `0x1613beB3B2C4f22Ee086B2b38C1476A3cE7f78E8` |
+| HypervisorFactory | `0x9E545E3C0baAB3E08CdfD552C960A1050f373042` |
+| Admin | `0x70e0bA845a1A0F2DA3359C97E0285013525FFC49` |
+| RebalanceProxy | `0x4826533B4897376654Bb4d4AD88B7faFD0C98528` |
+
+LP token is **`Gamma aHydratedDOT-HOLLAR` / `gaHydratedDOT-HOLLAR`**. The name and symbol are
+ERC20 constructor args with no setter, so they are read off chain at deploy time rather than
+written as literals — `aHydratedDOT` is asset 1001's actual on-chain symbol.
 
 | Config | Value |
 | --- | --- |
-| `twapInterval` | `3600` s |
+| `twapInterval` | **`600` s live**, target `3600` s |
 | `priceThreshold` | `10100` |
 | `maxTranslation` | `300` |
 | `maxWidth` | `300` |
 | `minInterval` | `600` s |
+| Base range at handover | `[182520, 183780]` (width 1260) |
 | Posture | `bootstrap` |
+
+> `twapInterval` is deployed at **600 s** and raised to 3600 s once the pool has an hour of
+> trading history. `observe()` reverts with `OLD` for any window longer than the pool has
+> actually recorded, and ClearingV2 calls `observe()` on **every** deposit — so setting 3600
+> on a fresh pool makes the seed deposit revert. Vault ownership is already with Admin.
 
 ---
 
@@ -116,7 +142,17 @@ governance surfaces, listed so nothing gets guessed at.
   deployer EOA (`0xf39Fd6e5…`) on this fork. On mainnet the Admin owner is a governance
   address and the deploy hands it over as its last step.
 - **lark4 is a fork and gets reset.** If a call starts returning the zero address, re-check
-  the deployment before debugging the integration.
+  the deployment before debugging the integration. The v3 addresses survive a rebuild (nonce-0
+  CREATE), so "the factory answers but `getPool` is zero" means the pool was not recreated yet —
+  not that you have the wrong address. **Gamma addresses do not survive**; re-read them.
+- **Two things break a freshly reset fork**, both found on 2026-08-26:
+  - A snapshot inherits mainnet's in-flight referenda. The Root track's `maxDeciding` is 3, and
+    their alarms are mainnet block heights the fork will never reach, so if mainnet had 3 Root
+    referenda deciding, *every* new Root referendum queues forever and `system.setCode` can
+    never enact. Pick the snapshot block by `Referenda::DecidingCount(0) <= 2` — mainnet's RPC
+    is an archive node, so it can be measured directly.
+  - `node4_fork`'s memory cap was 15000M and it OOMed repeatedly. A *freshly bootstrapped* fork
+    already used 9.2 GB of it. Raised to 32000M (`node3_fork`, the one that stays up, is 20000M).
 - Source artifacts: `mainnet/deployments/lark4.json` and `lark4-pools.json` in this repo
   (gitignored — regenerate with `02-deploy.js` / `03-create-pool.js`), and
   `lark/deployments/lark4.json` in `gamma-hypervisor`.

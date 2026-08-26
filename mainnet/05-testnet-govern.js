@@ -12,10 +12,21 @@
  *       -> currencies.updateBalance FAILS with Currencies::NotSupported
  *          (pallets/currencies/src/lib.rs: BoundErc20::contract_address(id).is_some()
  *           => fail!(Error::NotSupported)) because the balance lives in an EVM
- *          contract, not pallet-tokens. So we move real supply instead:
- *          dispatcher.dispatchAsTreasury(currencies.transfer(dest, id, amount)),
- *          which routes through Erc20Currency and does the EVM transfer with the
- *          treasury account's derived EVM address as `from`.
+ *          contract, not pallet-tokens. So we move real supply out of the treasury.
+ *
+ *          NOT via currencies.transfer, though. That routes through the runtime's
+ *          Erc20Currency, which hardcodes GAS_LIMIT = 400_000
+ *          (runtime/hydradx/src/evm/erc20_currency.rs:24). HOLLAR is a plain ERC20
+ *          and fits; aDOT is an Aave aToken whose transfer runs finalizeTransfer —
+ *          reserve index update, collateral bookkeeping, health-factor check, cold
+ *          SSTOREs — and measured 1,232,829 gas on lark4, i.e. 3.1x over the cap.
+ *          It fails with Dispatcher::EvmOutOfGas while the referendum itself still
+ *          reports Ok, so nothing on the surface says the funding did not happen.
+ *
+ *          We therefore issue the transfer as a direct evm.call with a gas limit we
+ *          choose. `source` is the treasury's own EVM address: EnsureAddressTruncated
+ *          lets a Substrate account call evm.call as its first 20 bytes, and
+ *          dispatch_as_treasury dispatches as exactly that account.
  *
  * Requires a chain where //Alice holds enough HDX to carry a Root referendum
  * alone and Parameters::IsTestnet is true (1-block confirm/enactment tracks).
@@ -28,6 +39,15 @@ const { cryptoWaitReady } = require("@polkadot/util-crypto");
 const { env, requireEnv } = require("./lib");
 
 const HDX_DECIMALS = 12n;
+
+// PalletId "py/trsry" -> AccountId "modl" ++ "py/trsry" ++ zero pad. Its first 20
+// bytes are the EVM address evm.call must use as `source` when dispatched as treasury.
+const TREASURY_EVM = "0x6d6f646c70792f74727372790000000000000000";
+
+// Comfortably over the 1.23M an aDOT (aToken) transfer measured; you only pay used gas.
+const ERC20_TRANSFER_GAS = Number(env("ERC20_TRANSFER_GAS", "2000000"));
+
+const ERC20_IFACE = new ethers.Interface(["function transfer(address,uint256) returns (bool)"]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** EVM address -> the ETH-prefixed AccountId32 the runtime maps it to. */
@@ -206,6 +226,12 @@ async function main() {
       return;
     }
 
+    // Bid over the current dynamic-evm-fee base so the treasury's evm.call is not
+    // priced out between submission and enactment. Unused gas is not charged.
+    const baseFee = BigInt(await provider.send("eth_gasPrice", []));
+    const maxFeePerGas = (baseFee * 4n).toString();
+    console.log(`  gas price ${baseFee} wei, bidding ${maxFeePerGas}`);
+
     const calls = [];
     if (!(await whitelisted())) {
       calls.push(api.tx.evmAccounts.addContractDeployer(deployer));
@@ -220,11 +246,29 @@ async function main() {
         continue;
       }
       if (info.type === "Erc20") {
-        // Root cannot mint an Erc20 asset; move it out of the treasury instead.
+        // Root cannot mint an Erc20 asset; move it out of the treasury instead, as a
+        // direct evm.call so we control the gas limit. See the header comment —
+        // currencies.transfer is capped at 400k gas and an aToken transfer needs ~1.23M.
+        const data = ERC20_IFACE.encodeFunctionData("transfer", [deployer, need.toString()]);
         calls.push(
-          api.tx.dispatcher.dispatchAsTreasury(api.tx.currencies.transfer(dest, id, need.toString()))
+          api.tx.dispatcher.dispatchAsTreasury(
+            api.tx.evm.call(
+              TREASURY_EVM,
+              info.contract,
+              data,
+              0,
+              ERC20_TRANSFER_GAS,
+              maxFeePerGas,
+              null,
+              null,
+              [],
+              []
+            )
+          )
         );
-        console.log(`  + dispatchAsTreasury(currencies.transfer ${need} of ${info.symbol})`);
+        console.log(
+          `  + dispatchAsTreasury(evm.call ${info.symbol}.transfer ${need}, gas ${ERC20_TRANSFER_GAS})`
+        );
       } else {
         calls.push(api.tx.currencies.updateBalance(dest, id, need.toString()));
         console.log(`  + currencies.updateBalance ${need} of ${info.symbol}`);
