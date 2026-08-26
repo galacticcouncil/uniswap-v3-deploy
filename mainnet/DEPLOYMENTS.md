@@ -12,7 +12,8 @@ but **every Gamma address changed**. The pool address is unchanged too, since it
 (token0, token1, fee) from the same factory.
 
 Verified on-chain at lark4 block 730 — all 19 addresses below hold code and match the generated
-artifacts; smoke test 14/14; a deposit through UniProxy minted shares.
+artifacts; smoke test 14/14; and a **freshly generated keypair** — not a pre-funded one — deposited
+through UniProxy and was minted shares, so the path is open to any account.
 
 | | |
 | --- | --- |
@@ -49,7 +50,21 @@ The router's WETH9 is the asset-20 gas precompile. Native-value paths — `unwra
 
 **4. Vault deposits go through UniProxy, never the Hypervisor directly.**
 UniProxy is what applies the ClearingV2 guards, and ClearingV2 calls `observe()` on every
-deposit against the configured TWAP window (currently 600 s, target 3600 s — see below).
+deposit against the configured TWAP window.
+
+**5. But approve the Hypervisor, not UniProxy.**
+This is the trap in the sentence above. You *call* `UniProxy.deposit(...)`, but UniProxy
+forwards to `Hypervisor.deposit(…, from = msg.sender)` and it is the **Hypervisor** that runs
+`transferFrom` against you. An allowance granted to UniProxy is never touched and the deposit
+reverts. Approve with the `2^128-1` sentinel — the asset precompile reads a u128 `Balance`, so
+`MaxUint256` overflows.
+
+**6. Deposits are permissionless, but ratio-checked and range-checked.**
+There is no depositor allowlist — `freeDepositList` only *relaxes* the ratio rule for an
+address, it does not gate entry, and `maxTotalSupply` is `0` (uncapped). What will reject you:
+supplying only one side, supplying a pair outside the band `UniProxy.getDepositAmount()`
+returns, or depositing while the pool tick is outside the vault's base range. Read the required
+pair amount from `getDepositAmount()` rather than computing it yourself.
 
 ---
 
@@ -58,7 +73,7 @@ deposit against the configured TWAP window (currently 600 s, target 3600 s — s
 aDOT/HOLLAR, 0.3% tier. The observation ring is **sized** for a full hour (cardinality 2000),
 but sizing is not history: the slots are reserved, and one is filled per block that trades. So
 `observe(w)` still reverts with `OLD` for any `w` longer than the pool has actually been running,
-however large the ring is. That is why `twapInterval` starts at 600 s — see the Gamma section.
+however large the ring is. That is why `twapInterval` is only 30 s here — see the Gamma section.
 
 | | Address |
 | --- | --- |
@@ -121,7 +136,7 @@ written as literals — `aHydratedDOT` is asset 1001's actual on-chain symbol.
 
 | Config | Value |
 | --- | --- |
-| `twapInterval` | **`600` s live**, target `3600` s |
+| `twapInterval` | **`30` s** — deliberately short, lark only |
 | `priceThreshold` | `10100` |
 | `maxTranslation` | `300` |
 | `maxWidth` | `300` |
@@ -129,10 +144,14 @@ written as literals — `aHydratedDOT` is asset 1001's actual on-chain symbol.
 | Base range at handover | `[182520, 183780]` (width 1260) |
 | Posture | `bootstrap` |
 
-> `twapInterval` is deployed at **600 s** and raised to 3600 s once the pool has an hour of
-> trading history. `observe()` reverts with `OLD` for any window longer than the pool has
-> actually recorded, and ClearingV2 calls `observe()` on **every** deposit — so setting 3600
-> on a fresh pool makes the seed deposit revert. Vault ownership is already with Admin.
+> **`twapInterval` is 30 s here, and that is a testnet-only setting.** ClearingV2 calls
+> `observe()` on every deposit, and `observe(w)` reverts with `OLD` for any `w` longer than
+> the pool has actually been running — so a long window locks deposits out of a fresh pool
+> for that long. 30 s keeps lark4 immediately usable for anyone poking at it. It also makes
+> the price-deviation guard nearly toothless, which is fine on a fork nobody profits from
+> manipulating and **not** fine anywhere else: mainnet launches at 3600 s, matching
+> `TWAP_WINDOW_SECS` in `mainnet/.env`. Raise it with `ClearingV2.setTwapInterval` (owner-only,
+> no minimum enforced) once the pool has that much history.
 
 ---
 
