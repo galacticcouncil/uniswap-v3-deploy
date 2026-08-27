@@ -86,10 +86,23 @@ however large the ring is. That is why `twapInterval` is only 30 s here — see 
 | Fee tier | `3000` |
 | Tick spacing | `60` |
 | Initialised at | `0.900622` HOLLAR per aDOT |
-| Current tick | `183168` |
+| Current tick | `183151` |
 | Observation cardinality | `2000 / 2000` |
-| Liquidity | `18980229243982476` |
+| Reserves | **56,233 aDOT + 50,551 HOLLAR ≈ $100.9k** |
+| In-range liquidity | `5418385156609095965` |
 | Protocol fee | `4 / 4` — ON, 25% of swap fees (`slot0.feeProtocol = 68`) |
+
+Depth comes from two NPM positions held by the deployer — `tokenId 1` (the original
+~200 aDOT smoke-test seed) and `tokenId 2` (~$100k) — plus whatever the Gamma vault
+currently has minted. Both NPM positions are **full range**, which is robust (they can
+never be stranded one-sided) but spreads capital thinly: measured price impact selling
+aDOT is ~171 bps at $900 and ~1499 bps at $9k. A concentrated band would buy far more
+depth per dollar at the cost of going one-sided if price leaves it.
+
+The aDOT for that position did not exist on the fork — the snapshot's treasury held
+only ~55. aDOT is minted one way only, by supplying DOT to the Aave market, which
+`11-mint-adot.js` does (Root mints DOT, since DOT is `Token`-kind and therefore
+mintable unlike aDOT and HOLLAR).
 
 The init price was derived from **the fork's own Omnipool**, not the price feed:
 `lrna_per(aDOT) / lrna_per(HOLLAR)` = `0.15102427 / 0.16768871` = `0.900622`. A fork has no
