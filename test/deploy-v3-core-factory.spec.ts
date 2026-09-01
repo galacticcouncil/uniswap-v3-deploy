@@ -26,12 +26,14 @@ describe('deploy-v3-core-factory', () => {
 
   describe('DEPLOY_V3_CORE_FACTORY', () => {
     it('deploys the v3 core factory contract', async () => {
+      const gasLimit = BigNumber.from(6_000_000)
       const result = singleElem(
         await DEPLOY_V3_CORE_FACTORY(
           {},
           {
             signer,
             gasPrice: BigNumber.from(1),
+            gasLimit,
             ownerAddress: DUMMY_ADDRESS,
             v2CoreFactoryAddress: DUMMY_ADDRESS,
             weth9Address: DUMMY_ADDRESS,
@@ -40,6 +42,7 @@ describe('deploy-v3-core-factory', () => {
         )
       )
       expect(result.message).to.eq('Contract UniswapV3Factory deployed')
+      expect((await provider.getTransaction(result.hash!)).gasLimit).to.deep.eq(gasLimit)
     })
 
     it('does not deploy if already deployed', async () => {

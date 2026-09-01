@@ -2,15 +2,15 @@
  * 02-deploy.js — run this repo's @uniswap/deploy-v3 CLI against the configured
  * network and write a clean address handoff file.
  *
- * Same shape as zombienet/deploy.js, but env-driven and resumable: state is
- * kept per network, so a crashed run picks up at the failed step.
+ * Same shape as zombienet/deploy.js, but env-driven and resumable. It records
+ * the target chain ID alongside the address sheet and refuses stale state.
  */
 
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { ethers } = require("ethers");
-const { env, requireEnv, assetToEvmAddress, saveJson } = require("./lib");
+const { env, requireEnv, assetToEvmAddress, gasOverrides, saveJson } = require("./lib");
 
 const REPO = path.join(__dirname, "..");
 const WETH9 = assetToEvmAddress(20); // router-only field; never called on ERC-20 paths
@@ -29,9 +29,9 @@ const PRODUCTION_NETS = ["mainnet"];
  *   0xaa7e…aa7e0  -> dispatcher.dispatchAsAaveManager (Root | EconomicParameters)
  *   0x6d6f646c…   -> dispatcher.dispatchAsTreasury    (Root | Treasurer)
  *
- * Getting this wrong is not loud. The dispatcher returns Ok while the inner
- * evm.call reverts, so the referendum reports success and changes nothing —
- * that is how money-market ref 322 bricked. Fail here instead, where it throws.
+ * Getting this wrong is not loud. The dispatcher can return Ok while the inner
+ * evm.call reverts, so an outer governance action may report success while
+ * changing nothing. Fail here instead, where it throws.
  */
 function resolveOwner(net, deployer) {
   const configured = env("OWNER_ADDRESS");
@@ -57,39 +57,93 @@ function resolveOwner(net, deployer) {
   return deployer;
 }
 
-function main() {
+async function main() {
   const net = env("NET", "mainnet");
   const rpc = env("EVM_RPC_URL", "https://rpc.hydradx.cloud");
   const pk = requireEnv("DEPLOYER_PK");
   const deployer = new ethers.Wallet(pk).address;
   const owner = resolveOwner(net, deployer);
+  const provider = new ethers.JsonRpcProvider(rpc);
   const state = path.join(__dirname, "deployments", `${net}-state.json`);
   fs.mkdirSync(path.dirname(state), { recursive: true });
 
-  const cli = path.join(REPO, "dist", "index.js");
-  if (!fs.existsSync(cli)) {
-    console.log("=== Building deploy-v3 CLI (yarn build) ===");
-    execFileSync("yarn", ["build"], {
-      cwd: REPO,
-      stdio: "inherit",
-      env: { ...process.env, NODE_OPTIONS: "--openssl-legacy-provider" },
-    });
+  // The upstream migration state only stores addresses. Before it is resumed,
+  // prove that every saved address has code on the selected chain; otherwise a
+  // stale state could skip ownership-transfer or deployment steps.
+  if (fs.existsSync(state)) {
+    const recorded = JSON.parse(fs.readFileSync(state, "utf8"));
+    const addresses = Object.entries(recorded).filter(([, v]) => typeof v === "string" && ethers.isAddress(v));
+    if (addresses.length) {
+      console.log(`  resume state found (${addresses.length} addresses) — validating against ${rpc}`);
+      const missing = [];
+      for (const [key, addr] of addresses) {
+        const code = await provider.getCode(addr);
+        if (!code || code === "0x") missing.push(`${key} ${addr}`);
+      }
+      if (missing.length) {
+        throw new Error(
+          `resume state ${state} does not match this chain — no code at:\n    ` +
+            missing.join("\n    ") +
+            `\n  Refusing to resume a state file from another chain. ` +
+            `Remove ${state} only after confirming this is a fresh deployment.`
+        );
+      }
+      console.log(`  resume state validated — all recorded contracts exist on chain`);
+    }
   }
+
+  const cli = path.join(REPO, "dist", "index.js");
+  console.log("=== Building deploy-v3 CLI from this checkout ===");
+  execFileSync("npm", ["run", "build"], { cwd: REPO, stdio: "inherit" });
+
+  // Hydration's RPC simulation path rejects an unlisted deployer, but an
+  // actual signed CREATE is accepted by the runtime. Supplying a fixed gas
+  // limit avoids `eth_estimateGas`, so the deployment neither depends on that
+  // RPC-only allowlist nor on an estimate that can under-shoot on this chain.
+  const overrides = await gasOverrides(provider);
+  const gasPriceWei = overrides.gasPrice.toString();
+  const gasLimit = overrides.gasLimit.toString();
 
   console.log(`=== Deploying Uniswap v3 -> ${rpc} (${net}) ===`);
   console.log(`  deployer ${deployer}`);
   console.log(
     `  owner    ${owner}${owner === deployer ? "  (DEPLOY KEY — testnet only)" : "  (governance; CLI transfers at the end of the run)"}`
   );
+  console.log(`  gas      ${gasPriceWei} wei, limit ${gasLimit}`);
   execFileSync(
     "node",
-    [cli, "-pk", pk, "-j", rpc, "-w9", WETH9, "-ncl", "WETH", "-o", owner, "-s", state, "-c", env("CONFIRMATIONS", "2")],
+    [
+      cli,
+      "-pk",
+      pk,
+      "-j",
+      rpc,
+      "-w9",
+      WETH9,
+      "-ncl",
+      "WETH",
+      "-o",
+      owner,
+      "-s",
+      state,
+      "-c",
+      env("CONFIRMATIONS", "2"),
+      "--gas-price-wei",
+      gasPriceWei,
+      "--gas-limit",
+      gasLimit,
+    ],
     { stdio: "inherit" }
   );
 
   const s = JSON.parse(fs.readFileSync(state, "utf8"));
   const out = {
-    network: { name: net, evmRpc: rpc, substrateWs: env("WS_URL", "wss://rpc.hydradx.cloud") },
+    network: {
+      name: net,
+      chainId: (await provider.getNetwork()).chainId.toString(),
+      evmRpc: rpc,
+      substrateWs: env("WS_URL", "wss://rpc.hydradx.cloud"),
+    },
     deployer,
     owner,
     tokens: {
@@ -123,9 +177,7 @@ function main() {
   console.log(`  Wrote ${p}`);
 }
 
-try {
-  main();
-} catch (e) {
+main().catch((e) => {
   console.error("\n  Deploy FAILED:", e.message, "\n");
   process.exit(1);
-}
+});

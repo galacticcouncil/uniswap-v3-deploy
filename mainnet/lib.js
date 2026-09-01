@@ -1,5 +1,5 @@
 /**
- * lib.js — shared helpers for the mainnet/lark launch scripts.
+ * lib.js — shared helpers for the mainnet launch scripts.
  *
  * Everything is env-driven (see .env.example); no chain writes happen here.
  */
@@ -8,7 +8,13 @@ const fs = require("fs");
 const path = require("path");
 
 try {
-  require("dotenv").config({ path: path.join(__dirname, ".env") });
+  // Keep the selected launch configuration explicit. This lets an operator run
+  // `ENV_FILE=.env.mainnet npm run all` without copying a production key into
+  // the default .env (which is commonly a local-fork configuration).
+  const envFile = process.env.ENV_FILE
+    ? path.resolve(process.cwd(), process.env.ENV_FILE)
+    : path.join(__dirname, ".env");
+  require("dotenv").config({ path: envFile });
 } catch {
   /* dotenv optional — plain env vars work too */
 }
@@ -45,8 +51,8 @@ function assetToEvmAddress(assetId) {
  *   1. The pool identity. `UniswapV3TradeExecutor::find_pool` resolves through
  *      the real contract, so a pool created on the alias is a DIFFERENT pool that
  *      the router can never find.
- *   2. Transfers. aDOT's alias reverts on `transfer` (verified on lark4 2026-08-24)
- *      while its contract works, so an alias pool cannot even be seeded.
+ *   2. Transfers. An Erc20-kind asset's alias can revert on `transfer` while
+ *      its registered contract works, so an alias pool cannot be seeded.
  *
  * It also flips token ordering for aDOT/HOLLAR: by alias HOLLAR sorts first, by
  * contract aDOT does.
@@ -177,6 +183,54 @@ async function readFeedE18(ethers, address, provider, staleSeconds) {
   return { priceE18: BigInt(answer) * 10n ** BigInt(18 - dec), age, decimals: dec };
 }
 
+/**
+ * Transaction overrides that survive Hydration's DynamicEvmFee.
+ *
+ * Setting `gasPrice` explicitly does two things at once:
+ *
+ *  1. **Clears the fee floor.** Hydration recomputes the EVM base fee every
+ *     block, so a fee ethers resolved a moment ago can be under the floor by
+ *     the time the tx is applied. It is then dropped at apply with
+ *     `Invalid: { Custom: 2 }` = `GasPriceTooLow` (frontier's
+ *     `TransactionValidationError` index 2 — NOT a transaction-type rejection,
+ *     which can otherwise be misdiagnosed). A local-fork rehearsal showed that
+ *     an unpriced `03-create-pool.js` transaction can be silently dropped and
+ *     the script can hang on
+ *     `.wait()` forever, because a dropped extrinsic never produces a receipt.
+ *
+ *  2. **Makes it a legacy (type-0) tx**, sidestepping ethers v6's EIP-1559
+ *     estimation entirely. Both types are accepted by the runtime; pinning one
+ *     just removes a moving part.
+ *
+ * The multiplier is generous because unused gas is not charged and a stuck
+ * deploy is far more expensive than an overbid.
+ */
+async function gasOverrides(provider, extra = {}) {
+  const base = BigInt(await provider.send("eth_gasPrice", []));
+  const mult = BigInt(env("GAS_PRICE_MULT", "4"));
+  if (mult < 1n) throw new Error(`GAS_PRICE_MULT must be at least 1, got ${mult}`);
+  const out = { gasPrice: base * mult };
+
+  // Explicit gasLimit, because Hydration's eth_estimateGas can under-shoot and
+  // ethers then sends the estimate verbatim. In a local-fork rehearsal,
+  // `pool.initialize(sqrtPriceX96)` estimated 84,912 and the
+  // tx reverted having burned exactly 84,912 — out of gas — while an eth_call
+  // of the same invocation succeeded. A status-0 receipt at exactly the
+  // estimate is the signature of this, not a logic revert.
+  //
+  // Unused gas is not charged, so overshooting is free. The EVM block gas limit
+  // is 20,000,000 (NORMAL_DISPATCH_RATIO * MAXIMUM_BLOCK_WEIGHT / WEIGHT_PER_GAS);
+  // exceeding it is rejected as Custom(1) GasLimitExceedsBlockLimit.
+  const limit = env("EVM_GAS_LIMIT", "15000000");
+  if (limit && !("gasLimit" in extra)) {
+    const n = BigInt(limit);
+    if (n < 21_000n) throw new Error(`EVM_GAS_LIMIT ${n} is below the intrinsic transaction minimum`);
+    if (n > 20_000_000n) throw new Error(`EVM_GAS_LIMIT ${n} exceeds the 20,000,000 block gas limit`);
+    out.gasLimit = n;
+  }
+  return { ...out, ...extra };
+}
+
 function loadDeployments(net) {
   const p = path.join(__dirname, "deployments", `${net}.json`);
   if (!fs.existsSync(p)) throw new Error(`${p} not found — run 02-deploy.js first`);
@@ -186,7 +240,9 @@ function loadDeployments(net) {
 function saveJson(rel, obj) {
   const p = path.join(__dirname, rel);
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(obj, null, 2) + "\n");
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n");
+  fs.renameSync(tmp, p);
   return p;
 }
 
@@ -203,6 +259,7 @@ module.exports = {
   priceE18FromSqrtPriceX96,
   fmtE18,
   ABI,
+  gasOverrides,
   loadDeployments,
   saveJson,
 };

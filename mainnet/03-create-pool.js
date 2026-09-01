@@ -1,8 +1,7 @@
 /**
- * 03-create-pool.js — create + initialize the pool at the ORACLE price and
- * grow the observation ring buffer so TWAP (ClearingV2 deposit guard, keeper
- * gates) actually works. No liquidity is added here — seeding goes through
- * the Gamma UniProxy in gamma-hypervisor.
+ * Create, initialize and prepare the one production pool. No liquidity is
+ * added here: production seeding belongs to the Gamma deployment and is kept
+ * deliberately outside this irreversible v3 deployment.
  *
  * Price resolution (TOKEN_B per 1 TOKEN_A, human units):
  *   - PRICE_FEED_A                -> TOKEN_A/USD. TOKEN_B assumed 1 USD, or set
@@ -11,11 +10,7 @@
  *   - both                        -> the feed wins, abort if they diverge more
  *     than MAX_DIVERGENCE_BPS (a wrong init price is free money for the first arber).
  *
- * Feeds are Chainlink AggregatorV3, one contract per pair — NOT DIA
- * getValue(string). DIA supplies the data; the chain serves it through the
- * AggregatorV3 interface, the same feeds the Aave market reads. Every Hydration
- * feed reverts on getValue() (verified against mainnet 2026-08-21), so the pair
- * is selected by ADDRESS and there is no key string.
+ * Feeds use Chainlink AggregatorV3's latestRoundData interface.
  */
 
 const { ethers } = require("ethers");
@@ -31,6 +26,7 @@ const {
   priceE18FromSqrtPriceX96,
   fmtE18,
   ABI,
+  gasOverrides,
   loadDeployments,
   saveJson,
 } = require("./lib");
@@ -52,20 +48,14 @@ const divergenceBps = (a, b) => {
 // difference between 600 (3594s, reverts on a 3600s window) and 601.
 const coverage = (cardinality, blockSecs) => Math.max(0, cardinality - 1) * blockSecs;
 
-/**
- * A v3 pool has no "pair" — it has token0/token1, assigned by sorting the two raw
- * addresses. On Hydration the address is the asset id in its last 4 bytes, so that
- * sort is an ID sort, and the ordering FLIPS between the DOT test pair and the aDOT
- * launch pair: 5 < 222 makes DOT token0, but 222 < 1001 makes HOLLAR token0 and aDOT
- * token1. Every tick sign downstream inverts with it and nothing reverts to say so —
- * aDOT and DOT are both 10 decimals, so the wrong pool looks right until the
- * Hypervisor points at it. The sort is dynamic (correct); this pins what we MEANT.
- */
 function assertOrdering(token0, token1, want0, want1) {
   const expect0 = env("EXPECT_TOKEN0");
   const expect1 = env("EXPECT_TOKEN1");
   if (!expect0 || !expect1) {
-    console.log("  ! EXPECT_TOKEN0/EXPECT_TOKEN1 unset — token ordering NOT asserted");
+    if (env("NET", "mainnet") === "mainnet") {
+      throw new Error("EXPECT_TOKEN0 and EXPECT_TOKEN1 are required on mainnet");
+    }
+    console.log("  ! token order is not pinned (set EXPECT_TOKEN0/EXPECT_TOKEN1 for this non-mainnet run)");
     return;
   }
   const same = (a, b) => a.toLowerCase() === b.toLowerCase();
@@ -77,6 +67,13 @@ function assertOrdering(token0, token1, want0, want1) {
     );
   }
   console.log(`  ordering asserted: token0=asset ${expect0}, token1=asset ${expect1}`);
+}
+
+async function waitForSuccess(tx, confirmations, label) {
+  const receipt = await tx.wait(confirmations, 15 * 60_000);
+  if (!receipt || receipt.status !== 1) throw new Error(`${label} reverted or timed out (${tx.hash})`);
+  console.log(`  ${label}: ${receipt.hash}`);
+  return receipt;
 }
 
 async function resolvePriceE18(provider) {
@@ -118,6 +115,8 @@ async function main() {
   const d = loadDeployments(net);
   const provider = new ethers.JsonRpcProvider(env("EVM_RPC_URL", d.network.evmRpc));
   const wallet = new ethers.Wallet(requireEnv("DEPLOYER_PK"), provider);
+  const confirmations = Number(env("CONFIRMATIONS", "2"));
+  if (!Number.isInteger(confirmations) || confirmations < 1) throw new Error("CONFIRMATIONS must be a positive integer");
 
   const assetA = Number(env("TOKEN_A", "1001"));
   const assetB = Number(env("TOKEN_B", "222"));
@@ -159,13 +158,13 @@ async function main() {
 
   const factory = new ethers.Contract(d.uniswap.v3CoreFactory, ABI.factory, wallet);
   if ((await factory.feeAmountTickSpacing(fee)) === 0n) {
-    throw new Error(`fee tier ${fee} not enabled on factory — 04-owner-ops.js enable-fee-tier`);
+    throw new Error(`fee tier ${fee} is not enabled on the factory`);
   }
 
   let pool = await factory.getPool(token0, token1, fee);
   if (pool === ethers.ZeroAddress) {
     console.log("  creating pool...");
-    await (await factory.createPool(token0, token1, fee)).wait();
+    await waitForSuccess(await factory.createPool(token0, token1, fee, await gasOverrides(provider)), confirmations, "createPool");
     pool = await factory.getPool(token0, token1, fee);
     if (pool === ethers.ZeroAddress) throw new Error("pool creation failed");
   }
@@ -175,7 +174,7 @@ async function main() {
   let s = await poolC.slot0().catch(() => null);
   if (!s || s.sqrtPriceX96 === 0n) {
     console.log(`  initialize sqrtPriceX96 ${sqrtPriceX96}`);
-    await (await poolC.initialize(sqrtPriceX96)).wait();
+    await waitForSuccess(await poolC.initialize(sqrtPriceX96, await gasOverrides(provider)), confirmations, "initialize");
     s = await poolC.slot0();
   } else {
     const current = priceE18FromSqrtPriceX96(s.sqrtPriceX96, Number(decA), Number(decB), aIsToken0);
@@ -189,7 +188,7 @@ async function main() {
   // Grow the TWAP observation ring in chunks (each new slot is an SSTORE; one
   // big jump can exceed the block gas limit).
   const target = Number(env("OBS_CARDINALITY", "2000"));
-  const chunk = Number(env("OBS_CHUNK", "250"));
+  let chunk = Number(env("OBS_CHUNK", "250"));
   const windowSecs = Number(env("TWAP_WINDOW_SECS", "3600"));
   const blockSecs = Number(env("BLOCK_TIME_SECS", "2"));
   const minCardinality = Math.ceil(windowSecs / blockSecs) + 1;
@@ -202,11 +201,41 @@ async function main() {
     );
   }
 
+  // Each new observation slot is a cold zero->nonzero SSTORE inside Oracle.grow's
+  // loop, and the cost is exactly linear: a local-fork measurement was about
+  // 42,456 gas/slot (+25 slots = 1,061,400; +50 = 2,122,800).
+  // So a 250-slot chunk needs 10,614,000 — just over a 10M EVM_GAS_LIMIT, and it
+  // fails as a status-0 receipt that burned the entire limit, with no revert
+  // reason. Clamp the chunk to what the gas limit can actually pay for instead
+  // of letting that happen.
+  const GAS_PER_OBSERVATION_SLOT = 42456;
+  const gasLimit = Number(env("EVM_GAS_LIMIT", "15000000"));
+  const maxChunk = Math.floor((gasLimit * 0.9) / GAS_PER_OBSERVATION_SLOT);
+  if (maxChunk < 1) {
+    throw new Error(`EVM_GAS_LIMIT=${gasLimit} cannot grow even one observation slot (~${GAS_PER_OBSERVATION_SLOT} gas)`);
+  }
+  if (chunk > maxChunk) {
+    console.log(
+      `  ! OBS_CHUNK ${chunk} needs ~${(chunk * GAS_PER_OBSERVATION_SLOT).toLocaleString("en-US")} gas, ` +
+        `over EVM_GAS_LIMIT ${gasLimit.toLocaleString("en-US")} — clamping to ${maxChunk}`
+    );
+    chunk = maxChunk;
+  }
+  console.log(
+    `  growing ring to ${target} in chunks of ${chunk} ` +
+      `(~${(chunk * GAS_PER_OBSERVATION_SLOT).toLocaleString("en-US")} gas/tx, ` +
+      `~${Math.ceil((target - Number(s.observationCardinalityNext)) / chunk)} txs)`
+  );
+
   let next = Number(s.observationCardinalityNext);
   while (next < target) {
     const step = Math.min(target, next + chunk);
     console.log(`  observation cardinality ${next} -> ${step}...`);
-    await (await poolC.increaseObservationCardinalityNext(step)).wait();
+    await waitForSuccess(
+      await poolC.increaseObservationCardinalityNext(step, await gasOverrides(provider)),
+      confirmations,
+      `increase observation cardinality to ${step}`
+    );
     next = Number((await poolC.slot0()).observationCardinalityNext);
   }
   const covers = coverage(next, blockSecs);
@@ -234,26 +263,25 @@ async function main() {
     console.log(`  protocol fee: ${fpDesc(fp0)} / ${fpDesc(fp1)} (matches FEE_PROTOCOL=${fpWant})`);
   } else {
     console.log(
-      `  ! protocol fee is ${fpDesc(fp0)} / ${fpDesc(fp1)}, expected ${fpDesc(fpWant)} on both —` +
-        ` run: node 04-owner-ops.js set-fee-protocol ${pool}`
+        `  ! protocol fee is ${fpDesc(fp0)} / ${fpDesc(fp1)}, expected ${fpDesc(fpWant)} on both —` +
+        ` include it in: node 01-governance-calldata.js launch ${pool}`
     );
   }
 
-  const outPath = saveJson(`deployments/${net}-pools.json`, {
-    ...((() => { try { return loadDeployments(`${net}-pools`); } catch { return {}; } })()),
-    [`${assetA}-${assetB}-${fee}`]: {
-      pool,
-      token0,
-      token1,
-      fee,
-      tick: Number(final.tick),
-      sqrtPriceX96: final.sqrtPriceX96.toString(),
-      observationCardinalityNext: next,
-      feeProtocol: [fp0, fp1],
-    },
+  const outPath = saveJson(`deployments/${net}-pool.json`, {
+    chainId: (await provider.getNetwork()).chainId.toString(),
+    pool,
+    token0,
+    token1,
+    assetIds: [assetA, assetB],
+    fee,
+    tick: Number(final.tick),
+    sqrtPriceX96: final.sqrtPriceX96.toString(),
+    observationCardinalityNext: next,
+    feeProtocol: [fp0, fp1],
   });
   console.log(`  Wrote ${outPath}`);
-  console.log("=== Done — pool is live, unseeded. Next: gamma-hypervisor vault + UniProxy deposit. ===");
+  console.log("=== Pool is live and unseeded. Generate the governance launch bundle next. ===");
 }
 
 main().catch((e) => {

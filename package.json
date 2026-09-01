@@ -9,7 +9,7 @@
   "main": "dist/index.js",
   "scripts": {
     "test": "mocha",
-    "build": "ncc build index.ts -o dist -m",
+    "build": "NODE_OPTIONS=--openssl-legacy-provider ncc build index.ts -o dist -m",
     "postbuild": "cat shebang.txt dist/index.js > dist/index.cmd.js && mv dist/index.cmd.js dist/index.js",
     "prestart": "yarn build",
     "start": "node dist/index.js",

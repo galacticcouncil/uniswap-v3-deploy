@@ -1,202 +1,183 @@
 /**
- * 00-preflight.js — read-only checks before touching mainnet:
- *   EVM RPC + chain id, deployer address, ContractDeployer whitelist,
- *   WETH gas balance, registry-resolved asset addresses + pool token ordering,
- *   parameters.uniswapV3* storage (post PR #1477), DIA feed freshness,
- *   EMA-oracle tracking for the pair (see `checkOracleTracking` below).
+ * Read-only launch gate. It validates the target, key, assets, price source
+ * and pool configuration before any transaction is sent.
  */
 
 const { ethers } = require("ethers");
 const { ApiPromise, WsProvider } = require("@polkadot/api");
-const { env, requireEnv, readFeedE18, assetToEvmAddress, resolveAssetAddress, ABI } = require("./lib");
+const {
+  env,
+  requireEnv,
+  parsePriceToE18,
+  readFeedE18,
+  assetToEvmAddress,
+  resolveAssetAddress,
+  ABI,
+} = require("./lib");
 
-const ok = (m) => console.log(`  ✓ ${m}`);
-const warn = (m) => console.log(`  ! ${m}`);
+let failures = 0;
+const pass = (message) => console.log(`  ✓ ${message}`);
+const fail = (message) => {
+  failures += 1;
+  console.log(`  ✗ ${message}`);
+};
+const note = (message) => console.log(`  ! ${message}`);
 
-/**
- * Will the runtime actually record this pool's trades in the EMA oracle?
- *
- * A v3 swap reports to the oracle under the `uniswpv3` source, and that record is
- * what pallet-dca and route-executor's set_route read. But the oracle DISCARDS
- * entries for pairs it does not track and returns success while doing so — so an
- * untracked pair produces a pool that trades fine and can never be DCA'd or set as
- * a default route, with no error, event or log to explain it.
- *
- * A pair is tracked when BOTH assets are `isSufficient` in the registry (the
- * asset-registry rule ignores the source entirely), or when the pair was added
- * explicitly via `emaOracle.addOracle`. Checking here turns a silent, invisible
- * failure into a launch-day line item.
- */
-async function checkOracleTracking(api) {
+const numberIn = (name, min, max) => {
+  const value = Number(env(name));
+  if (!Number.isInteger(value) || value < min || value > max) {
+    fail(`${name} must be an integer in [${min}, ${max}], got ${env(name)}`);
+    return undefined;
+  }
+  pass(`${name}=${value}`);
+  return value;
+};
+
+async function checkAssetPair(api, provider) {
   const ids = [Number(env("TOKEN_A", "1001")), Number(env("TOKEN_B", "222"))];
-  const entries = await Promise.all(ids.map((id) => api.query.assetRegistry.assets(id)));
-
-  const sufficiency = entries.map((e, i) => {
-    if (e.isNone) return { id: ids[i], sufficient: false, note: "not registered" };
-    const u = e.unwrap();
-    return { id: ids[i], sufficient: u.isSufficient.isTrue, note: u.symbol.toHuman() };
-  });
-
-  for (const a of sufficiency) {
-    a.sufficient
-      ? ok(`asset ${a.id} (${a.note}) isSufficient`)
-      : warn(`asset ${a.id} (${a.note}) is NOT sufficient`);
+  if (!ids.every(Number.isInteger) || ids[0] === ids[1]) {
+    fail("TOKEN_A and TOKEN_B must be two distinct integer asset IDs");
+    return;
   }
 
-  if (sufficiency.every((a) => a.sufficient)) {
-    return ok("pair is EMA-oracle tracked (both assets sufficient) — v3 trades will be recorded");
+  const assets = [];
+  for (const [label, id] of [["TOKEN_A", ids[0]], ["TOKEN_B", ids[1]]]) {
+    try {
+      const address = await resolveAssetAddress(api, id);
+      const token = new ethers.Contract(address, ABI.erc20, provider);
+      const [symbol, decimals] = await Promise.all([token.symbol(), token.decimals()]);
+      const alias = assetToEvmAddress(id);
+      pass(`${label} asset ${id}: ${symbol} (${decimals} decimals) at ${address}`);
+      if (address.toLowerCase() !== alias.toLowerCase()) {
+        note(`${label} is an Erc20-kind asset; its alias ${alias} is not the pool token`);
+      }
+      const registry = await api.query.assetRegistry.assets(id);
+      assets.push({ id, address, sufficient: registry.isSome && registry.unwrap().isSufficient.isTrue });
+    } catch (error) {
+      fail(`${label} asset ${id} is not usable: ${error.message}`);
+    }
+  }
+  if (assets.length !== 2) return;
+
+  const [token0, token1] = [...assets].sort((a, b) => a.address.toLowerCase().localeCompare(b.address.toLowerCase()));
+  pass(`pool order: token0 = asset ${token0.id}, token1 = asset ${token1.id}`);
+
+  const expected = [env("EXPECT_TOKEN0"), env("EXPECT_TOKEN1")];
+  if (env("NET", "mainnet") === "mainnet" && (!expected[0] || !expected[1])) {
+    fail("EXPECT_TOKEN0 and EXPECT_TOKEN1 are required on mainnet");
+  } else if (expected[0] || expected[1]) {
+    Number(expected[0]) === token0.id && Number(expected[1]) === token1.id
+      ? pass("expected token ordering matches the registry")
+      : fail(`expected token order ${expected.join("/")} disagrees with registry ${token0.id}/${token1.id}`);
   }
 
-  // Fall back to the explicit whitelist, which is keyed by (source, orderedPair).
-  const [lo, hi] = [...ids].sort((x, y) => x - y);
-  let listed = false;
-  try {
-    const list = await api.query.emaOracle.whitelistedAssets();
-    listed = list.toJSON().some((e) => {
-      const [src, pair] = e;
-      const srcAscii = Buffer.from(String(src).replace(/^0x/, ""), "hex").toString("ascii");
-      return srcAscii === "uniswpv3" && Number(pair[0]) === lo && Number(pair[1]) === hi;
-    });
-  } catch {
-    /* older runtimes may not expose it; the warning below still applies */
+  if (assets.every((asset) => asset.sufficient)) {
+    pass("pair is automatically tracked by the EMA oracle");
+  } else {
+    note("pair needs an EMA-oracle governance entry; `npm run governance -- ema` will print it");
   }
-
-  listed
-    ? ok(`pair explicitly whitelisted via emaOracle.addOracle(uniswpv3, (${lo}, ${hi}))`)
-    : warn(
-        `pair is NOT EMA-oracle tracked — v3 trades will be silently discarded, so DCA and ` +
-          `set_route through this pool will keep failing. Fix: governance call ` +
-          `emaOracle.addOracle("uniswpv3", (${lo}, ${hi})).`
-      );
 }
 
-/**
- * Resolve both pool assets the way the RUNTIME does, and report the ordering
- * `03-create-pool.js` will assert against.
- *
- * The alias (`0x…01 ++ id`) answers `symbol()` and `decimals()` for an Erc20-kind
- * asset too — on mainnet the aDOT alias reports "aDOT", 10 decimals — so checking
- * it here would print a green tick for an address the pool is never built on. It
- * has to come from the registry: `Erc20` -> the registered contract, `Token` ->
- * the alias. Only the contract addresses decide token0/token1, and for the launch
- * pair the two schemes sort OPPOSITE ways (by alias HOLLAR first, by contract aDOT
- * first), so this is also the one place an operator can read the correct
- * EXPECT_TOKEN0/EXPECT_TOKEN1 before `03` aborts on them.
- */
-async function checkAssetsAndOrdering(api, provider) {
-  const ids = [Number(env("TOKEN_A", "1001")), Number(env("TOKEN_B", "222"))];
-  const addrs = [];
-
-  for (const [label, id] of [
-    ["TOKEN_A", ids[0]],
-    ["TOKEN_B", ids[1]],
-  ]) {
-    let addr;
+async function checkPrice(provider) {
+  const staleSeconds = numberIn("STALE_SECONDS", 1, 7 * 24 * 60 * 60);
+  const manual = env("PRICE");
+  if (manual) {
     try {
-      addr = await resolveAssetAddress(api, id);
-    } catch (e) {
-      warn(`${label} asset ${id}: ${e.message}`);
-      return;
+      parsePriceToE18(manual);
+      pass(`manual PRICE=${manual} is a valid decimal`);
+    } catch (error) {
+      fail(error.message);
     }
-    const alias = assetToEvmAddress(id);
-    const viaContract = addr.toLowerCase() !== alias.toLowerCase();
-    try {
-      const erc = new ethers.Contract(addr, ABI.erc20, provider);
-      const [sym, dec] = await Promise.all([erc.symbol(), erc.decimals()]);
-      ok(`${label} asset ${id} -> ${addr} (${sym}, ${dec} decimals, ${viaContract ? "Erc20 contract" : "Token alias"})`);
-    } catch {
-      warn(`${label} asset ${id} -> ${addr}: not readable`);
-      return;
-    }
-    if (viaContract) console.log(`      alias ${alias} is NOT this asset's address — do not use it`);
-    addrs.push({ id, addr });
   }
 
-  const [t0, t1] = [...addrs].sort((a, b) => (a.addr.toLowerCase() < b.addr.toLowerCase() ? -1 : 1));
-  ok(`pool ordering: token0 = asset ${t0.id}, token1 = asset ${t1.id}`);
-
-  const [e0, e1] = [env("EXPECT_TOKEN0"), env("EXPECT_TOKEN1")];
-  if (!e0 || !e1) {
-    return warn(`EXPECT_TOKEN0/EXPECT_TOKEN1 unset — set EXPECT_TOKEN0=${t0.id} EXPECT_TOKEN1=${t1.id}`);
+  const feedA = env("PRICE_FEED_A");
+  if (!feedA && !manual) {
+    fail("set PRICE_FEED_A and/or PRICE for the irreversible pool initialization");
+    return;
   }
-  Number(e0) === t0.id && Number(e1) === t1.id
-    ? ok(`EXPECT_TOKEN0/EXPECT_TOKEN1 match the chain`)
-    : warn(
-        `EXPECT_TOKEN0=${e0} EXPECT_TOKEN1=${e1} contradicts the chain — 03-create-pool.js will abort. ` +
-          `Correct values: EXPECT_TOKEN0=${t0.id} EXPECT_TOKEN1=${t1.id}`
-      );
-}
-
-async function main() {
-  const evmRpc = env("EVM_RPC_URL", "https://rpc.hydradx.cloud");
-  const wsUrl = env("WS_URL", "wss://rpc.hydradx.cloud");
-  const provider = new ethers.JsonRpcProvider(evmRpc);
-  const wallet = new ethers.Wallet(requireEnv("DEPLOYER_PK"), provider);
-
-  console.log(`=== Preflight (${env("NET", "mainnet")}) ===`);
-  const net = await provider.getNetwork();
-  ok(`EVM RPC ${evmRpc} — chainId ${net.chainId}, block ${await provider.getBlockNumber()}`);
-  console.log(`  deployer ${wallet.address}`);
-
-  const gas = await provider.getBalance(wallet.address);
-  gas > 0n
-    ? ok(`WETH gas balance ${ethers.formatEther(gas)}`)
-    : warn(`WETH gas balance is 0 — fund asset 20 before deploying`);
-
-  // Asset addresses are resolved further down, once the substrate API is up:
-  // an Erc20-kind asset lives at its registered contract, not at the alias, and
-  // only the registry knows which kind it is.
-
-  // Price feeds are Chainlink AggregatorV3, one contract per pair. DIA supplies
-  // the data but does NOT serve it: every Hydration feed reverts on
-  // getValue(string) and answers latestRoundData().
-  const stale = Number(env("STALE_SECONDS", "3600"));
-  for (const [label, key] of [
-    ["PRICE_FEED_A", "PRICE_FEED_A"],
-    ["PRICE_FEED_B", "PRICE_FEED_B"],
-  ]) {
+  for (const key of ["PRICE_FEED_A", "PRICE_FEED_B"]) {
     const address = env(key);
-    if (!address) {
-      key === "PRICE_FEED_A"
-        ? warn(`${label} not set — 03-create-pool.js will need PRICE`)
-        : ok(`${label} not set — TOKEN_B assumed 1 USD`);
+    if (!address) continue;
+    if (!ethers.isAddress(address)) {
+      fail(`${key} is not an address: ${address}`);
       continue;
     }
     try {
-      const desc = await new ethers.Contract(address, ABI.aggregatorV3, provider).description();
-      const r = await readFeedE18(ethers, address, provider, stale);
-      ok(`${label} ${address} "${desc}" = ${(Number(r.priceE18) / 1e18).toFixed(6)} USD (age ${r.age}s)`);
-    } catch (e) {
-      warn(`${label} ${address} unreadable: ${e.message}`);
+      const feed = new ethers.Contract(address, ABI.aggregatorV3, provider);
+      const [description, reading] = await Promise.all([feed.description(), readFeedE18(ethers, address, provider, staleSeconds)]);
+      pass(`${key} ${description}: ${ethers.formatUnits(reading.priceE18, 18)} USD (age ${reading.age}s)`);
+    } catch (error) {
+      fail(`${key} cannot supply a fresh AggregatorV3 reading: ${error.message}`);
     }
   }
+}
 
-  const api = await ApiPromise.create({ provider: new WsProvider(wsUrl) });
+async function main() {
+  const netName = env("NET", "mainnet");
+  const evmRpc = env("EVM_RPC_URL", "https://rpc.hydradx.cloud");
+  const wsUrl = env("WS_URL", "wss://rpc.hydradx.cloud");
+  const provider = new ethers.JsonRpcProvider(evmRpc);
+  const deployer = new ethers.Wallet(requireEnv("DEPLOYER_PK"));
+
+  console.log(`=== Uniswap v3 preflight: ${netName} ===`);
+  const network = await provider.getNetwork();
+  const expectedChainId = env("CHAIN_ID", netName === "mainnet" ? "222222" : undefined);
+  if (expectedChainId && network.chainId !== BigInt(expectedChainId)) {
+    fail(`EVM chain ID is ${network.chainId}, expected ${expectedChainId}`);
+  } else {
+    pass(`EVM RPC ${evmRpc}, chain ${network.chainId}, block ${await provider.getBlockNumber()}`);
+  }
+
+  const balance = await provider.getBalance(deployer.address);
+  balance > 0n
+    ? pass(`deployer ${deployer.address} has ${ethers.formatEther(balance)} WETH for gas`)
+    : fail(`deployer ${deployer.address} has no WETH for gas`);
+
+  const owner = env("OWNER_ADDRESS");
+  if (!ethers.isAddress(owner || "")) {
+    fail("OWNER_ADDRESS must be a governance-controlled EVM address");
+  } else if (netName === "mainnet" && owner.toLowerCase() === deployer.address.toLowerCase()) {
+    fail("OWNER_ADDRESS is the deployer; mainnet factory and ProxyAdmin ownership must go to governance");
+  } else {
+    pass(`post-deploy owner ${owner}`);
+  }
+
+  numberIn("FEE", 1, 1_000_000);
+  const protocolFee = numberIn("FEE_PROTOCOL", 0, 10);
+  if (protocolFee !== undefined && protocolFee !== 0 && protocolFee < 4) {
+    fail("FEE_PROTOCOL must be 0 or 4..10");
+  }
+  const twap = numberIn("TWAP_WINDOW_SECS", 1, 7 * 24 * 60 * 60);
+  const blockTime = numberIn("BLOCK_TIME_SECS", 1, 60);
+  const cardinality = numberIn("OBS_CARDINALITY", 2, 65_535);
+  if (twap && blockTime && cardinality) {
+    const minimum = Math.ceil(twap / blockTime) + 1;
+    cardinality >= minimum
+      ? pass(`observation ring covers at least the ${twap}s TWAP window`)
+      : fail(`OBS_CARDINALITY=${cardinality} is below ${minimum}, the minimum for a ${twap}s window`);
+  }
+
+  await checkPrice(provider);
+
+  const api = await ApiPromise.create({ provider: new WsProvider(wsUrl), noInitWarn: true });
   try {
-    ok(`substrate WS ${wsUrl} — ${await api.rpc.system.chain()}`);
-    const whitelisted = (await api.query.evmAccounts.contractDeployer(wallet.address)).isSome;
-    whitelisted
-      ? ok("deployer whitelisted in EVMAccounts::ContractDeployer")
-      : warn("deployer NOT whitelisted — run 01-governance-calldata.js whitelist");
-
-    if (api.query.parameters?.uniswapV3Factory) {
-      const f = await api.query.parameters.uniswapV3Factory();
-      f.isSome
-        ? ok(`parameters.uniswapV3Factory = ${f.unwrap().toHex()}`)
-        : warn("parameters.uniswapV3Factory unset — router venue not configured yet");
+    pass(`Substrate WS ${wsUrl}: ${await api.rpc.system.chain()}`);
+    await checkAssetPair(api, provider);
+    if (!api.tx.parameters?.setUniswapV3Addresses) {
+      note("runtime has no parameters.setUniswapV3Addresses; router registration will be skipped");
     } else {
-      warn("runtime has no parameters.uniswapV3* storage — PR #1477 not live on this chain");
+      pass("runtime supports parameters.setUniswapV3Addresses");
     }
-
-    await checkAssetsAndOrdering(api, provider);
-    await checkOracleTracking(api);
   } finally {
     await api.disconnect();
   }
-  console.log("=== Preflight done ===");
+
+  console.log("");
+  if (failures) throw new Error(`${failures} preflight check(s) failed`);
+  console.log("=== preflight passed ===");
 }
 
-main().catch((e) => {
-  console.error("\n  Preflight FAILED:", e.message, "\n");
+main().catch((error) => {
+  console.error(`\nPreflight failed: ${error.message}\n`);
   process.exit(1);
 });
