@@ -166,11 +166,25 @@ async function verify(api) {
 
   console.log("\n--- runtime integration ---");
   (await emaTracked(api, ids)) ? pass("EMA oracle tracks the pair") : fail("EMA oracle does not track the pair");
+  // All three addresses are set by one call and all three are load-bearing:
+  // the executor resolves pools through the factory, prices through the quoter
+  // and swaps through the swap router. A wrong address is silent — `getPool`
+  // against a codeless address simply finds no pool — so check each one against
+  // the deployment record rather than trusting the factory as a proxy for the set.
+  const routerStorage = [
+    ["uniswapV3Factory", "v3CoreFactory"],
+    ["uniswapV3SwapRouter", "swapRouter02"],
+    ["uniswapV3Quoter", "quoterV2"],
+  ];
   if (api.query.parameters?.uniswapV3Factory) {
-    const factoryAddress = await api.query.parameters.uniswapV3Factory();
-    factoryAddress.isSome
-      ? equalAddress("parameters.uniswapV3Factory", factoryAddress.unwrap().toString(), deployment.uniswap.v3CoreFactory)
-      : fail("parameters.uniswapV3Factory is unset");
+    for (const [storageKey, deploymentKey] of routerStorage) {
+      const stored = await api.query.parameters[storageKey]();
+      if (!stored.isSome) {
+        fail(`parameters.${storageKey} is unset`);
+        continue;
+      }
+      equalAddress(`parameters.${storageKey}`, stored.unwrap().toString(), deployment.uniswap[deploymentKey]);
+    }
   } else {
     note("runtime has no Uniswap-v3 router parameter storage");
   }

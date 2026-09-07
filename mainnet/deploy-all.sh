@@ -28,8 +28,12 @@ cat <<'EOF'
 
 Direct EVM deployment is complete. No governance transaction was submitted.
 
+This assumes the deploy key was already listed on EVMAccounts::ContractDeployer
+by an earlier referendum (node 01-governance-calldata.js deployer). Step 1/4
+fails if it was not.
+
 Next:
-  1. Review and submit the printed proposal.
+  1. Review and submit the printed proposal on track 0 (Root).
   2. After enactment, run: ENV_FILE=<this file> npm run verify
   3. Wait for real TWAP history before the separate Gamma seed deployment.
 EOF

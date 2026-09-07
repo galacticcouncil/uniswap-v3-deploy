@@ -2,18 +2,25 @@
 
 This directory deploys the immutable Uniswap v3 contracts, creates the
 aDOT/HOLLAR pool at an oracle-checked price, prepares its TWAP ring, and prints
-the governance proposal that turns on the protocol fee and runtime integration.
-It never submits governance transactions and it does not seed liquidity.
+the governance proposals that authorize the deployer and turn on the protocol
+fee and the runtime router. It never submits governance transactions and it does
+not seed liquidity.
 
 The mainnet flow is deliberately small:
 
 | Phase | Command | Result |
 | --- | --- | --- |
+| Authorize | `npm run governance -- deployer` | Prints the Root proposal listing the deploy key. **Must be enacted before deploying.** |
 | Validate | `npm run preflight` | Read-only target/configuration gate |
 | Deploy | `npm run deploy` | Full v3 contract stack and an address sheet |
 | Pool | `npm run pool` | Creates, initializes and prepares the pool |
 | Govern | `npm run governance -- launch` | Prints, but does not submit, the live-runtime proposal |
 | Verify | `npm run verify` | Read-only post-enactment verification |
+
+There are **two** referenda, and their order is load-bearing. The first lists
+the deploy key and must enact before any contract is deployed. The second
+carries the protocol fee and the router registration, and can only be built
+after the contracts exist, because it contains their addresses.
 
 ## Operator runbook
 
@@ -23,10 +30,14 @@ npm ci
 cp .env.example .env.mainnet
 # Fill DEPLOYER_PK and review every value.
 
+# 1. Authorize the deploy key, then submit and wait for enactment.
+ENV_FILE=.env.mainnet npm run governance -- deployer
+
+# 2. Once that referendum has enacted:
 ENV_FILE=.env.mainnet npm run all
 ```
 
-`npm run all` stops after printing the governance proposal. Submit the exact
+`npm run all` stops after printing the launch proposal. Submit the exact
 preimage through OpenGov, wait for enactment, then run:
 
 ```bash
@@ -36,20 +47,29 @@ ENV_FILE=.env.mainnet npm run verify -- events <first-enactment-block> <count>
 ```
 
 The verifier checks contract code, ownership, the registry-resolved pool tokens,
-initialization, protocol fee, TWAP capacity, EMA tracking, router registration
-when supported by the runtime, and governance-event failure markers.
+initialization, protocol fee, TWAP capacity, EMA tracking, all three router
+addresses, and governance-event failure markers.
 
 ## Launch boundaries
 
-- On 2026-09-01, Hydration mainnet runtime spec 440 does not expose
-  `parameters.setUniswapV3Addresses`. The launch proposal therefore contains
-  the protocol-fee call only. The standalone v3 stack and pool can launch now,
-  but native router-venue registration remains a runtime-upgrade dependency;
-  after that upgrade, run `npm run governance -- router` and verify again.
-- The deployer needs WETH for EVM gas. It does not need to be in
-  `EVMAccounts::ContractDeployer`: that list gates the RPC simulation route,
-  not a signed CREATE. The launch scripts send fixed-gas transactions and never
-  call `eth_estimateGas` for creation.
+- **Both proposals go on track 0 (Root).** This is not caution:
+  `pallet_parameters::set_uniswap_v3_addresses` is `ensure_root(origin)` with no
+  configurable origin type, so router registration cannot be an
+  EconomicParameters referendum. The protocol-fee and EMA calls individually do
+  accept the narrower track; bundling them under Root costs no extra privilege
+  and saves a second decision deposit and enactment window. The Root-equivalent
+  fast path is a Technical Committee whitelist of the preimage hash followed by
+  a track-1 (`whitelisted_caller`) referendum. The TC is not itself an origin
+  that can make these calls.
+- **The deploy key must be on `EVMAccounts::ContractDeployer` before deploying.**
+  From runtime spec 443 `pallet_evm`'s `CreateOriginFilter` is
+  `EnsureWhitelistedDeployer`, so an unlisted key's *signed* CREATE fails with
+  `evm.CreateOriginNotAllowed`. On spec 440 and earlier the filter was `()` and
+  the list only gated the RPC simulation route. Listing it is
+  `evmAccounts.addContractDeployer`, whose ControllerOrigin is Root or the
+  GeneralAdmin track. An enactment landing mid-run strands the deploy:
+  `02-deploy.js` will not resume once a recorded address has no code, and CREATE
+  addresses are nonce-derived.
 - `OWNER_ADDRESS` must be a governance-controlled EVM identity. On mainnet the
   script refuses to leave the factory or ProxyAdmin with the deployer.
 - aDOT and HOLLAR must be resolved from the asset registry. Their asset-ID
@@ -60,30 +80,47 @@ when supported by the runtime, and governance-event failure markers.
 
 Generated address/state files are intentionally ignored by Git. Preserve the
 generated `deployments/<net>.json`, `deployments/<net>-pool.json`, the reviewed
-configuration with the private key removed, the proposal preimage, referendum
-index, enactment block range, and final verifier output in the launch record.
+configuration with the private key removed, both proposal preimages, referendum
+indices, enactment block ranges, and final verifier output in the launch record.
 
 ---
 
 # Handoff
 
-Status as of **2026-09-01**: this flow was rehearsed end to end against a
-**chopsticks fork of mainnet** (runtime spec 440) and finished green. Nothing
-has been deployed to mainnet itself.
+Status as of **2026-09-07**: this flow was rehearsed end to end against a
+**chopsticks fork of mainnet running runtime spec 443** — the wasm built from
+`galacticcouncil/hydration-node` `origin/master` at `d1519bdc5`, which is the
+first runtime that carries both the Uniswap v3 router and the contract-deployer
+create filter. It finished green. Nothing has been deployed to mainnet itself.
+
+Mainnet is still on spec 440 at the time of writing. **This flow targets 443 and
+should be run after that runtime ships**, because the launch bundle registers the
+router and 440 has no `parameters.setUniswapV3Addresses`.
 
 What the rehearsal covered, in one run:
 
 | Phase | Result |
 | --- | --- |
-| `preflight` | passed — assets, registry-resolved addresses, token order, EMA tracking, feed freshness, ring sizing, owner |
+| unlisted CREATE probe | failed with `evm.CreateOriginNotAllowed` (module 90, error 13) — the filter is live |
+| `preflight` (before authorization) | correctly failed: deployer not in `EVMAccounts::ContractDeployer` |
+| referendum 1 — `governance -- deployer` | `evmAccounts.addContractDeployer`, 22 bytes, inline; enacted `Dispatched Ok` |
+| `preflight` (after) | passed — assets, registry-resolved addresses, token order, EMA tracking, feed freshness, ring sizing, owner |
 | `deploy` | 15/15 steps, each confirmed on chain before being reported |
-| `pool` | created and initialized at the feed price, ring grown to 2000/2000 |
-| `governance -- launch` | printed the `setFeeProtocol(4,4)` proposal; nothing submitted |
-| *(proposal enacted on the fork with Root)* | `evm.Executed`, `scheduler.Dispatched Ok`, preimage hash matched the printed one |
-| `verify` | exit 0, all checks green including `protocol fee 4/4` |
+| `pool` | created and initialized at the feed price (0.977483), ring grown to 2000 |
+| `verify` (before enactment) | correctly failed with 4 checks: protocol fee `0/0`, and all three router slots unset |
+| referendum 2 — `governance -- launch` | `utility.batchAll`, 255 bytes, preimage `0x4f81d0be…`, track 0 |
+| *(enacted on the fork with Root)* | `scheduler.Dispatched Ok`, no `evm.ExecutedFailed`, preimage hash matched the printed one |
+| `verify` (after) | exit 0, all checks green including `protocol fee 4/4` and all three router addresses |
 
-Before enactment the verifier failed with `✗ protocol fee 0/0; expected 4/4`
-and exit 1, so it discriminates rather than rubber-stamps.
+The verifier discriminates rather than rubber-stamps: it failed 4 checks before
+enactment and passed all of them after, with no change to the script.
+
+**What the rehearsal does not prove.** Router registration is verified at the
+storage level — the three addresses in `pallet_parameters` match the deployment
+record. It does not exercise a trade through `UniswapV3TradeExecutor`, because
+the launch pool is empty and a quote against zero liquidity is inconclusive
+either way. End-to-end executor coverage lives in
+`integration-tests/src/uniswap_v3_router.rs` on hydration-node master.
 
 ## Decisions already made — do not re-open
 
@@ -92,6 +129,7 @@ and exit 1, so it discriminates rather than rubber-stamps.
 | Pair | aDOT (1001) / HOLLAR (222) | `note-univ3-gamma-adot-hollar` |
 | Fee tier | 3000 (0.30%) | ALM spec §A |
 | Protocol fee | `setFeeProtocol(4, 4)` = 25%, on at launch | economics study P6, decided 2026-08-24 |
+| Governance track | 0 (Root), both referenda | `set_uniswap_v3_addresses` is `ensure_root` |
 | `token0` | **aDOT** — contract sort inverts the asset-ID sort | verified against the registry |
 | Factory + ProxyAdmin owner | `0xaa7e…aa7e0` (dispatcher Aave-manager) | economics study P5 |
 | Observation cardinality | 2000 (floor is 1801 at 2s blocks) | — |
@@ -108,13 +146,11 @@ One item is still worth confirming with Ben: ALM spec §H **D2** still reads
 cd mainnet
 npm ci
 cp .env.example .env.mainnet     # fill DEPLOYER_PK, review every value
-ENV_FILE=.env.mainnet npm run all
-```
 
-`npm run all` stops after printing the governance proposal. Submit that exact
-preimage on **track 9 (`economic_parameters`)**, and after enactment:
-
-```bash
+ENV_FILE=.env.mainnet npm run governance -- deployer   # referendum 1, track 0
+# ... wait for enactment ...
+ENV_FILE=.env.mainnet npm run all                      # prints referendum 2
+# ... wait for enactment ...
 ENV_FILE=.env.mainnet npm run verify
 ENV_FILE=.env.mainnet npm run verify -- events <first-enactment-block> <count>
 ```
@@ -127,6 +163,11 @@ only the event scan and the state verifier are evidence.
 
 ## Things that will bite
 
+- **An unauthorized deploy hangs, it does not error.** A CREATE from an unlisted
+  key fails as a *Substrate* extrinsic (`evm.CreateOriginNotAllowed`) and
+  therefore produces **no EVM receipt at all** — a script waiting on the receipt
+  waits forever. `00-preflight.js` is the only thing that catches this in
+  advance. Do not skip it.
 - **Always pass `ENV_FILE`.** With it unset, `lib.js` falls back to
   `mainnet/.env`. There is no such file now, and there should not be one —
   a stray `.env` would silently redirect a mainnet command at another chain.
@@ -137,6 +178,11 @@ only the event scan and the state verifier are evidence.
 - **Contract addresses depend on the deploy key's nonce sequence.** They are
   *not* portable from lark4 or from any rehearsal. Nothing downstream — SDK, UI,
   router registration — may carry a pre-existing `swapRouter02` or `quoterV2`.
+  This is also why the router addresses cannot be runtime constants.
+- **A wrong router address is silent.** `getPool` against an address holding no
+  code simply finds no pool, so the venue goes quiet instead of failing. The
+  verifier checks all three registered addresses against the deployment record
+  for exactly this reason; checking only the factory would not catch it.
 - **Resume state is chain-specific.** `deployments/<net>-state.json` records
   addresses only; `02-deploy.js` refuses to resume when any recorded address has
   no code on the target chain. Do not delete that file to "get past" the error.
@@ -153,17 +199,16 @@ only the event scan and the state verifier are evidence.
 
 - **Liquidity.** The pool launches live and empty. Seeding goes through the
   Gamma UniProxy in `gamma-hypervisor` so the ClearingV2 guards apply.
-- **Router registration.** Mainnet spec 440 has no
-  `parameters.setUniswapV3Addresses` (PR #1477 is unmerged), so nothing routes
-  to the pool yet and the launch proposal omits it. After that runtime ships,
-  run `npm run governance -- router` and verify again.
 - **TWAP history.** The ring reserves 2000 slots but fills one per block that
   *trades*. `observe(3600)` reverts until the pool has an hour of real trading,
   so the first Gamma seed deposit will fail before then.
+- **Running on spec 440.** The scripts degrade gracefully — the launch bundle
+  omits the router call and says so — but the result is a pool nothing routes
+  to. Wait for 443.
 
 ## Hand back after launch
 
 Archive, with `DEPLOYER_PK` removed: the reviewed config, both generated
-`deployments/<net>.json` and `<net>-pool.json`, the proposal preimage and hash,
-the referendum index, the enactment block range, and the passing `verify` and
-`verify -- events` output.
+`deployments/<net>.json` and `<net>-pool.json`, both proposal preimages and
+hashes, both referendum indices, the enactment block ranges, and the passing
+`verify` and `verify -- events` output.

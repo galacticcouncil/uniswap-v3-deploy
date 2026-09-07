@@ -1,10 +1,27 @@
 /**
  * Build governance proposals without submitting them.
  *
+ *   node 01-governance-calldata.js deployer [evmAddress]
  *   node 01-governance-calldata.js fee <pool> [feeProtocol]
  *   node 01-governance-calldata.js ema
  *   node 01-governance-calldata.js router
  *   node 01-governance-calldata.js launch [pool]
+ *
+ * Every proposal prints on track 0 (Root). That is not a cautious default, it
+ * is the only track that can carry the launch:
+ * `pallet_parameters::set_uniswap_v3_addresses` is `ensure_root(origin)` with
+ * no configurable origin type, so router registration is Root or nothing.
+ *
+ * The protocol-fee and EMA calls do individually accept the narrower
+ * EconomicParameters track, and earlier revisions of this script split them out
+ * for that reason. Bundling them under Root instead costs no additional
+ * privilege — the bundle needs Root regardless — and saves a second referendum,
+ * a second decision deposit and a second enactment window to reconcile.
+ *
+ * The Root-equivalent fast path is a Technical Committee whitelist of the
+ * preimage hash followed by a track-1 (`whitelisted_caller`) referendum, which
+ * dispatches the same call with Root. The TC is not itself an origin that can
+ * make these calls.
  */
 
 const { ethers } = require("ethers");
@@ -12,10 +29,7 @@ const { ApiPromise, WsProvider } = require("@polkadot/api");
 const { blake2AsHex } = require("@polkadot/util-crypto");
 const { env, gasOverrides, loadDeployments, resolveAssetAddress, sortTokens, ABI } = require("./lib");
 
-const TRACK = {
-  root: { id: 0, origin: { system: "Root" } },
-  economicParameters: { id: 9, origin: { Origins: "EconomicParameters" } },
-};
+const ROOT = { id: 0, origin: { system: "Root" } };
 const AAVE_MANAGER_EVM = "0xaa7e0000000000000000000000000000000aa7e0";
 const EMA_SOURCE = "0x756e697377707633"; // ASCII "uniswpv3", exactly eight bytes.
 
@@ -27,7 +41,7 @@ const feeProtocol = (value) => {
   return fee;
 };
 
-function printProposal(title, call, track) {
+function printProposal(title, call) {
   const encoded = call.method.toHex();
   const length = (encoded.length - 2) / 2;
   console.log(`\n=== ${title} ===`);
@@ -35,9 +49,9 @@ function printProposal(title, call, track) {
   console.log(`  encoded:       ${encoded}`);
   console.log(`  preimage hash: ${blake2AsHex(encoded)}`);
   console.log(`  length:        ${length}`);
-  console.log(`  track:         ${track.id}`);
-  console.log(`  origin:        ${JSON.stringify(track.origin)}`);
-  console.log("  submit:        note this preimage, submit it on the track above, and place its decision deposit.");
+  console.log(`  track:         ${ROOT.id} (root)`);
+  console.log(`  origin:        ${JSON.stringify(ROOT.origin)}`);
+  console.log("  submit:        note this preimage, submit it on track 0, and place its decision deposit.");
 }
 
 async function pair(api) {
@@ -61,6 +75,23 @@ async function emaCall(api) {
   if (!api.tx.emaOracle?.addOracle) throw new Error("runtime has no emaOracle.addOracle");
   const { orderedIds } = await pair(api);
   return api.tx.emaOracle.addOracle(EMA_SOURCE, orderedIds);
+}
+
+/**
+ * List the deploy key on `EVMAccounts::ContractDeployer`.
+ *
+ * This has to be enacted BEFORE 02-deploy.js runs, not bundled with the launch
+ * proposal. From runtime spec 443 `pallet_evm`'s `CreateOriginFilter` is
+ * `EnsureWhitelistedDeployer`, so an unlisted key's signed CREATE fails with
+ * `CreateOriginNotAllowed` — on spec 440 and earlier the filter was `()` and
+ * the list only gated the RPC simulation route.
+ */
+async function deployerCall(api, address) {
+  if (!api.tx.evmAccounts?.addContractDeployer) {
+    throw new Error("runtime has no evmAccounts.addContractDeployer");
+  }
+  if (!ethers.isAddress(address || "")) throw new Error(`not an EVM address: ${address}`);
+  return api.tx.evmAccounts.addContractDeployer(ethers.getAddress(address));
 }
 
 async function feeCall(api, provider, pool, value) {
@@ -99,7 +130,6 @@ async function deployedPool(api, provider) {
 
 async function launchCall(api, provider, explicitPool) {
   const calls = [];
-  let requiresRoot = false;
   const { orderedIds } = await pair(api);
   if (!(await emaTracked(api, orderedIds))) {
     calls.push(await emaCall(api));
@@ -116,22 +146,18 @@ async function launchCall(api, provider, explicitPool) {
 
   if (api.tx.parameters?.setUniswapV3Addresses) {
     calls.push(await routerCall(api));
-    requiresRoot = true;
     console.log("  + runtime Uniswap-v3 router registration");
   } else {
     console.log("  ! runtime router-registration call absent; omitted from launch proposal");
   }
   if (!calls.length) return undefined;
-  return {
-    call: calls.length === 1 ? calls[0] : api.tx.utility.batchAll(calls),
-    track: requiresRoot ? TRACK.root : TRACK.economicParameters,
-  };
+  return calls.length === 1 ? calls[0] : api.tx.utility.batchAll(calls);
 }
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
-  if (!command || !["fee", "ema", "router", "launch"].includes(command)) {
-    throw new Error("usage: node 01-governance-calldata.js <fee|ema|router|launch> [arguments]");
+  if (!command || !["deployer", "fee", "ema", "router", "launch"].includes(command)) {
+    throw new Error("usage: node 01-governance-calldata.js <deployer|fee|ema|router|launch> [arguments]");
   }
 
   const api = await ApiPromise.create({
@@ -142,20 +168,30 @@ async function main() {
   try {
     const version = api.runtimeVersion;
     console.log(`chain: ${version.specName} spec ${version.specVersion}`);
-    if (command === "fee") {
+    if (command === "deployer") {
+      // Default to the configured deploy key so the listed address cannot drift
+      // from the one that will actually send the CREATE transactions.
+      const address = args[0] ?? (env("DEPLOYER_PK") ? new ethers.Wallet(env("DEPLOYER_PK")).address : undefined);
+      if (!address) throw new Error("usage: deployer <evmAddress> (or set DEPLOYER_PK)");
+      if (!api.query.evmAccounts?.contractDeployer) throw new Error("runtime has no evmAccounts.contractDeployer");
+      const listed = await api.query.evmAccounts.contractDeployer(address);
+      if (listed.isSome) return console.log(`${address} is already an allowed contract deployer; no proposal needed.`);
+      printProposal(`allow ${address} to deploy contracts`, await deployerCall(api, address));
+      console.log("  order:         this must be ENACTED BEFORE 02-deploy.js runs.");
+    } else if (command === "fee") {
       const pool = args[0];
       if (!pool) throw new Error("usage: fee <pool> [feeProtocol]");
-      printProposal(`set protocol fee for ${pool}`, await feeCall(api, provider, pool, args[1]), TRACK.economicParameters);
+      printProposal(`set protocol fee for ${pool}`, await feeCall(api, provider, pool, args[1]));
     } else if (command === "ema") {
       const ids = (await pair(api)).orderedIds;
       if (await emaTracked(api, ids)) return console.log("EMA oracle already tracks this pair; no proposal needed.");
-      printProposal(`track EMA oracle for assets ${ids.join("/")}`, await emaCall(api), TRACK.economicParameters);
+      printProposal(`track EMA oracle for assets ${ids.join("/")}`, await emaCall(api));
     } else if (command === "router") {
-      printProposal("register Uniswap-v3 runtime addresses", await routerCall(api), TRACK.root);
+      printProposal("register Uniswap-v3 runtime addresses", await routerCall(api));
     } else {
-      const result = await launchCall(api, provider, args[0]);
-      if (!result) return console.log("All governance-controlled launch state already matches the configuration.");
-      printProposal("launch bundle", result.call, result.track);
+      const call = await launchCall(api, provider, args[0]);
+      if (!call) return console.log("All governance-controlled launch state already matches the configuration.");
+      printProposal("launch bundle", call);
     }
   } finally {
     await api.disconnect();

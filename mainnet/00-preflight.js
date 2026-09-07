@@ -112,6 +112,23 @@ async function checkPrice(provider) {
   }
 }
 
+/**
+ * The deployer must be on `EVMAccounts::ContractDeployer`. Listing an address
+ * is `evmAccounts.addContractDeployer`, whose ControllerOrigin is Root or the
+ * GeneralAdmin track — a governance lead time, not something a launch run can
+ * fix in place once it has started.
+ */
+async function checkDeployerWhitelist(api, deployerAddress) {
+  if (!api.query.evmAccounts?.contractDeployer) {
+    note("runtime has no evmAccounts.contractDeployer; deployer authorization not checked");
+    return;
+  }
+  const listed = await api.query.evmAccounts.contractDeployer(deployerAddress);
+  listed.isSome
+    ? pass(`deployer ${deployerAddress} is an allowed contract deployer`)
+    : fail(`deployer ${deployerAddress} is not in EVMAccounts::ContractDeployer; list it before deploying`);
+}
+
 async function main() {
   const netName = env("NET", "mainnet");
   const evmRpc = env("EVM_RPC_URL", "https://rpc.hydradx.cloud");
@@ -161,7 +178,8 @@ async function main() {
 
   const api = await ApiPromise.create({ provider: new WsProvider(wsUrl), noInitWarn: true });
   try {
-    pass(`Substrate WS ${wsUrl}: ${await api.rpc.system.chain()}`);
+    pass(`Substrate WS ${wsUrl}: ${await api.rpc.system.chain()} spec ${api.runtimeVersion.specVersion}`);
+    await checkDeployerWhitelist(api, deployer.address);
     await checkAssetPair(api, provider);
     if (!api.tx.parameters?.setUniswapV3Addresses) {
       note("runtime has no parameters.setUniswapV3Addresses; router registration will be skipped");
