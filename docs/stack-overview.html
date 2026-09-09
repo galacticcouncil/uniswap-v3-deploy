@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Uni v3 + Gamma on Hydration — stack overview</title>
+<style>
+  :root{
+    --bg:#fbfaf8; --panel:#ffffff; --ink:#1c1c1e; --ink-soft:#54545a; --ink-faint:#8a8a92;
+    --rule:#e6e3dd; --accent:#0f766e; --accent-soft:#e6f2f0;
+    --warn-bd:#e0b400; --warn-bg:#fdf8e6; --key-bd:#0f766e; --key-bg:#eef6f5;
+    --code-bg:#f4f2ee; --code-ink:#1c1c1e;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#16171a; --panel:#1d1f23; --ink:#e8e6e3; --ink-soft:#a9a7a3; --ink-faint:#77757a;
+      --rule:#2e3036; --accent:#5eead4; --accent-soft:#16302e;
+      --warn-bd:#b58900; --warn-bg:#2a2410; --key-bd:#2dd4bf; --key-bg:#12302d;
+      --code-bg:#232529; --code-ink:#e8e6e3;
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth; scroll-padding-top:24px}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       font-size:16.5px;line-height:1.65;-webkit-font-smoothing:antialiased}
+  #bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:99}
+  .wrap{display:flex;gap:48px;max-width:1180px;margin:0 auto;padding:0 28px}
+  nav{position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto;
+      padding:44px 0 60px;width:236px;flex:0 0 236px;font-size:13.5px}
+  nav .lbl{text-transform:uppercase;letter-spacing:.09em;font-size:10.5px;color:var(--ink-faint);
+           font-weight:600;margin:0 0 14px}
+  nav a{display:block;padding:5px 10px;margin-left:-10px;color:var(--ink-soft);text-decoration:none;
+        border-radius:5px;line-height:1.4}
+  nav a:hover{background:var(--accent-soft);color:var(--ink)}
+  nav a.on{color:var(--accent);font-weight:600;background:var(--accent-soft)}
+  nav a .n{color:var(--ink-faint);font-variant-numeric:tabular-nums;margin-right:7px;font-size:12px}
+  nav a.on .n{color:var(--accent)}
+  main{flex:1;min-width:0;max-width:760px;padding:44px 0 140px}
+  header.top{border-bottom:1px solid var(--rule);padding-bottom:26px;margin-bottom:40px}
+  h1{font-size:31px;line-height:1.2;margin:0 0 12px;letter-spacing:-.02em}
+  .sub{color:var(--ink-soft);font-size:16px;margin:0 0 18px}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;font-size:12px}
+  .pill{border:1px solid var(--rule);border-radius:99px;padding:3px 11px;color:var(--ink-soft);background:var(--panel)}
+  h2{font-size:22px;margin:64px 0 6px;letter-spacing:-.015em;scroll-margin-top:24px}
+  h2 .n{color:var(--accent);font-variant-numeric:tabular-nums;margin-right:10px;font-weight:600}
+  h2+.lede{color:var(--ink-soft);margin:0 0 22px;font-size:15px}
+  h3{font-size:16.5px;margin:34px 0 8px;letter-spacing:-.01em}
+  h4{font-size:14px;margin:24px 0 6px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.06em}
+  p{margin:0 0 16px}
+  ul,ol{margin:0 0 16px;padding-left:22px}
+  li{margin:0 0 7px}
+  li>ul,li>ol{margin-top:7px}
+  code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);color:var(--code-ink);
+       padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--rule);border-radius:8px;padding:16px 18px;
+      overflow-x:auto;margin:0 0 20px;font-family:var(--mono);font-size:12.5px;line-height:1.55}
+  pre code{background:none;padding:0;font-size:inherit}
+  table{width:100%;border-collapse:collapse;margin:0 0 20px;font-size:14px;display:block;overflow-x:auto}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+  th{font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-faint)}
+  td code{font-size:.85em}
+  .box{border-left:3px solid var(--rule);background:var(--panel);padding:14px 18px;margin:0 0 20px;
+       border-radius:0 7px 7px 0;font-size:15px}
+  .box p:last-child{margin-bottom:0}
+  .box .t{font-weight:650;font-size:12px;text-transform:uppercase;letter-spacing:.06em;
+          margin:0 0 6px;color:var(--ink-faint)}
+  .warn{border-left-color:var(--warn-bd);background:var(--warn-bg)}
+  .key{border-left-color:var(--key-bd);background:var(--key-bg)}
+  .key .t,.warn .t{color:inherit;opacity:.75}
+  hr{border:0;border-top:1px solid var(--rule);margin:52px 0}
+  .fig{margin:0 0 22px}
+  .fig figcaption{font-size:12.5px;color:var(--ink-faint);margin-top:8px;text-align:center}
+  svg{display:block;width:100%;height:auto}
+  .tag{font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:4px;
+       border:1px solid var(--rule);color:var(--ink-soft);white-space:nowrap}
+  .ok{color:#0f766e;border-color:#0f766e}
+  .no{color:#b45309;border-color:#b45309}
+  @media (prefers-color-scheme:dark){.ok{color:#5eead4;border-color:#2dd4bf}.no{color:#fbbf24;border-color:#b58900}}
+  .foot{margin-top:70px;padding-top:22px;border-top:1px solid var(--rule);
+        font-size:13px;color:var(--ink-faint)}
+  @media(max-width:960px){
+    nav{display:none}
+    .wrap{padding:0 20px}
+    main{padding:32px 0 80px;max-width:none}
+    h1{font-size:26px}
+  }
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<div class="wrap">
+<nav>
+  <p class="lbl">Contents</p>
+  <a href="#s0"><span class="n">0</span>What we're building</a>
+  <a href="#s1"><span class="n">1</span>Uniswap v3</a>
+  <a href="#s2"><span class="n">2</span>Why Gamma exists</a>
+  <a href="#s3"><span class="n">3</span>The keeper bot</a>
+  <a href="#s4"><span class="n">4</span>The Substrate side</a>
+  <a href="#s5"><span class="n">5</span>SDK and UI</a>
+  <a href="#s6"><span class="n">6</span>Deployment steps</a>
+  <a href="#s7"><span class="n">7</span>Where we are today</a>
+  <a href="#s8"><span class="n">8</span>Reference</a>
+</nav>
+
+<main>
+<header class="top">
+  <h1>Uniswap v3 + Gamma on Hydration</h1>
+  <p class="sub">How the concentrated-liquidity stack fits together — the pool, the vault that manages
+  it, the bot that moves it, and the runtime that routes to it.</p>
+  <div class="meta">
+    <span class="pill">~30 min read</span>
+    <span class="pill">aDOT / HOLLAR &middot; 0.3%</span>
+    <span class="pill">chain state checked 2026-09-09</span>
+  </div>
+</header>
+
+<h2 id="s0"><span class="n">0</span>What we're building</h2>
+<p class="lede">One sentence, then the map.</p>
+
+<p>We are putting a <strong>concentrated-liquidity market</strong> for aDOT/HOLLAR on Hydration, and
+automating the part that normally requires a human to babysit it.</p>
+
+<p>Three layers, each solving a problem the one below it creates:</p>
+
+<pre><code>Uniswap v3      deep liquidity from little capital — but someone must
+                choose a price range, and move it when the price moves
+
+Gamma           an ERC-20 vault that owns the v3 position, so depositors
+                get a fungible token instead of an unmanaged NFT
+
+Keeper bot      decides when and where to move the range, under
+                on-chain limits it cannot exceed
+
+Hydration       a Substrate chain with an EVM. The runtime must be told
+                the pool exists before native routing can use it</code></pre>
+
+<p>The end state: a user deposits two tokens through the UI, receives a vault token, and the
+bot keeps their liquidity centred on the market price while the chain's own router sends trade
+flow through the pool.</p>
+
+<hr>
+
+<h2 id="s1"><span class="n">1</span>Uniswap v3, enough to explain it</h2>
+<p class="lede">Skip the maths. Six ideas carry the whole design.</p>
+
+<h3>1.1 The problem v3 solves</h3>
+
+<p>In a classic AMM (Uniswap v2, and Hydration's own Omnipool in spirit), your capital is spread
+across <em>every possible price</em>, from zero to infinity. If DOT trades between $1.00 and $1.20 all
+year, the money you posted to quote DOT at $40 — or at 3 cents — does nothing. It sits there
+providing depth nobody will ever touch.</p>
+
+<p>v3's answer: <strong>let the LP pick a price range.</strong> Post the same money, but only between
+$0.99 and $1.20. Inside that range your quote is far deeper than it was; outside it, you quote
+nothing at all.</p>
+
+<p>The multiplier is large. Relative to a full-range position of the same size:</p>
+
+<table>
+<thead><tr><th>Range</th><th>Capital efficiency</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>&plusmn;10%</td><td>~21&times;</td><td>our launch band</td></tr>
+<tr><td>&plusmn;5%</td><td>~41&times;</td><td></td></tr>
+<tr><td>&plusmn;2%</td><td>~100&times;</td><td></td></tr>
+<tr><td>&plusmn;1%</td><td>~200&times;</td><td>stablecoin territory</td></tr>
+</tbody>
+</table>
+
+<div class="box key">
+<p class="t">The honest version</p>
+<p>Concentration multiplies your <strong>fees</strong> and your <strong>losses to arbitrage</strong> by the
+same factor. It is leverage on a market-making position, not free money. A tighter band is a
+bigger bet that the price stays put.</p>
+</div>
+
+<h3>1.2 Ticks — the price grid</h3>
+
+<p>Ranges cannot be arbitrary numbers. v3 quantises price onto a grid:</p>
+
+<pre><code>price = 1.0001 ^ tick</code></pre>
+
+<p>So <strong>one tick is one basis point</strong> (0.01%). Our pool sits at tick 185,084, which is
+1.0907 HOLLAR per aDOT. Every price in this document has a tick behind it, and every log line
+the keeper prints is in ticks — it is worth getting comfortable with the unit.</p>
+
+<p>Each fee tier also has a <strong>tick spacing</strong>: range boundaries must land on multiples of it.
+The 0.3% tier uses spacing 60, so band edges snap to every 60 ticks &asymp; 0.6%. This is why the
+keeper's band width is configured as a multiplier of spacing (<code>BASE_HALF_WIDTH_MULT=16</code>
+&rarr; 16&times;60 = 960 ticks &asymp; &plusmn;10%) rather than as a percentage.</p>
+
+<h3>1.3 What your position actually holds</h3>
+
+<p>This is the single most useful intuition, and the one people get wrong.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 640 200" role="img" aria-label="Position composition as price moves through a range">
+  <defs>
+    <linearGradient id="bandg" x1="0" x2="1">
+      <stop offset="0" stop-color="currentColor" stop-opacity=".07"/>
+      <stop offset="1" stop-color="currentColor" stop-opacity=".07"/>
+    </linearGradient>
+  </defs>
+  <g font-family="var(--sans)" font-size="11.5" fill="currentColor">
+    <rect x="170" y="34" width="300" height="52" fill="url(#bandg)" stroke="currentColor"
+          stroke-opacity=".28" stroke-dasharray="3 3" rx="4"/>
+    <line x1="40" y1="86" x2="600" y2="86" stroke="currentColor" stroke-opacity=".35"/>
+    <text x="320" y="26" text-anchor="middle" opacity=".6">your range</text>
+    <text x="170" y="102" text-anchor="middle" opacity=".55" font-size="10.5">lower</text>
+    <text x="470" y="102" text-anchor="middle" opacity=".55" font-size="10.5">upper</text>
+    <text x="596" y="102" text-anchor="end" opacity=".55" font-size="10.5">price &rarr;</text>
+
+    <circle cx="100" cy="86" r="4.5" fill="currentColor"/>
+    <circle cx="320" cy="86" r="4.5" fill="currentColor"/>
+    <circle cx="545" cy="86" r="4.5" fill="currentColor"/>
+
+    <g transform="translate(0,128)">
+      <rect x="55" y="0" width="90" height="15" rx="3" fill="currentColor" fill-opacity=".55"/>
+      <text x="100" y="34" text-anchor="middle" font-weight="600">100% aDOT</text>
+      <text x="100" y="50" text-anchor="middle" opacity=".6" font-size="10.5">below range &middot; earning nothing</text>
+
+      <rect x="275" y="0" width="42" height="15" rx="3" fill="currentColor" fill-opacity=".55"/>
+      <rect x="319" y="0" width="46" height="15" rx="3" fill="currentColor" fill-opacity=".22"/>
+      <text x="320" y="34" text-anchor="middle" font-weight="600">a mix</text>
+      <text x="320" y="50" text-anchor="middle" opacity=".6" font-size="10.5">in range &middot; earning fees</text>
+
+      <rect x="500" y="0" width="90" height="15" rx="3" fill="currentColor" fill-opacity=".22"/>
+      <text x="545" y="34" text-anchor="middle" font-weight="600">100% HOLLAR</text>
+      <text x="545" y="50" text-anchor="middle" opacity=".6" font-size="10.5">above range &middot; earning nothing</text>
+    </g>
+  </g>
+</svg>
+<figcaption>As price rises through your range, the pool takes your aDOT and leaves you HOLLAR.</figcaption>
+</figure>
+
+<ul>
+<li><strong>Price below your range</strong> — you hold only the cheaper asset (aDOT here). The market
+thinks aDOT is worth less than your lowest quote, so nobody has bought any from you.</li>
+<li><strong>Price inside</strong> — you hold a mix, and it shifts continuously. This is the only state
+where you earn fees.</li>
+<li><strong>Price above</strong> — you hold only HOLLAR. The market walked up through your whole range
+and bought every aDOT you had.</li>
+</ul>
+
+<p>Put plainly: <strong>you are always selling whatever is going up.</strong> That is the market-making
+trade. You get paid in fees for taking it, and you lose to arbitrageurs when the price trends
+rather than chops. When price leaves your range entirely you stop earning — which is exactly why
+somebody has to move the range, and why sections 2 and 3 exist.</p>
+
+<h3>1.4 Fees do not compound</h3>
+
+<p>Fees from swaps accrue to your position but are <em>not</em> added back into it. They sit as a
+claimable balance until someone explicitly collects and re-mints them. In vanilla v3 that is a
+manual chore; in our stack it is the keeper's <code>compound()</code> job (&sect;3.4).</p>
+
+<h3>1.5 The oracle built into every pool</h3>
+
+<p>Each pool keeps a ring buffer of <strong>observations</strong> — running sums of the tick over time.
+Ask <code>observe(3600)</code> and you get the time-weighted average price (TWAP) over the last hour.
+Because moving a TWAP requires holding a price for a sustained period, not just for one block,
+it is far more expensive to manipulate than spot. Both Gamma and our keeper lean on it heavily.</p>
+
+<p>The ring starts with <strong>one</strong> slot, which is not enough. You must call
+<code>increaseObservationCardinalityNext</code> to grow it — we grow to 2,000, since a 3600s window
+at Hydration's 2-second blocks needs a floor of 1,801 slots.</p>
+
+<div class="box">
+<p class="t">A nuance worth knowing</p>
+<p>Once the ring is grown, <code>observe(3600)</code> works <strong>one hour of wall clock after the pool is
+initialized, with zero trades ever having happened</strong> — the first observation is written at
+<code>initialize()</code> and the pool extrapolates forward at the current tick. It is bought with the
+clock, not with trading volume. (Left at cardinality 1, the first trade would overwrite that
+observation and you really would need an hour of trades.)</p>
+</div>
+
+<h3>1.6 Pools are unique and permanent</h3>
+
+<p>The factory maps <code>(token0, token1, fee)</code> to exactly one pool address, forever, via CREATE2.
+<code>createPool</code> reverts if it already exists. There is no redeploying a pool — if you initialize
+one at a bad price, you fix the price, you do not fix the pool. The only "fresh start" is a
+different fee tier, which orphans every address downstream.</p>
+
+<p>Token order also matters and is not up to you: <code>token0</code> is simply whichever contract address
+sorts lower. For us that is <strong>aDOT <code>0x0263…</code> = token0</strong>, <strong>HOLLAR <code>0x531a…</code> =
+token1</strong>. Every tick sign in the system depends on this.</p>
+
+<h3>1.7 What we deployed</h3>
+
+<p>The stock Uniswap v3 contract set, unmodified: the core <strong>factory</strong>, the
+<strong>NonfungiblePositionManager</strong> (NFT wrapper for positions), <strong>SwapRouter02</strong>,
+<strong>QuoterV2</strong> (simulates swaps for pricing), TickLens, Migrator, Staker and Multicall2 — plus
+the 1bp fee tier. One pool: aDOT/HOLLAR at 0.3%.</p>
+
+<div class="box warn">
+<p class="t">Two Hydration-specific quirks</p>
+<p><strong>aDOT is a rebasing aToken.</strong> Its balance grows with lending interest. v3 never reconciles
+its internal accounting against <code>balanceOf</code> and has no <code>skim()</code>, so supply interest earned
+on pool-held aDOT accrues to <em>nobody</em>. It is a small, permanent leak we accepted in exchange for
+a clean oracle anchor (1 aDOT &equiv; 1 DOT, so the pool price <em>is</em> DOT/USD).</p>
+<p><strong>aDOT transfers are expensive</strong> — about 1.23M gas, because every transfer runs Aave's
+<code>finalizeTransfer</code>. Any script or UI touching it needs a generous gas limit.</p>
+</div>
+
+<hr>
+
+<h2 id="s2"><span class="n">2</span>Why Gamma exists</h2>
+<p class="lede">v3 gives you a position. It does not give you a product.</p>
+
+<h3>2.1 The gap</h3>
+
+<p>A raw v3 position is an NFT with a fixed range. It has three problems as a product:</p>
+
+<ol>
+<li><strong>It's not fungible.</strong> Every LP has a different NFT with different bounds. You cannot
+build a vault token, farm it, or use it as collateral.</li>
+<li><strong>Nobody moves it.</strong> Price drifts out of range, the position goes one-sided and stops
+earning, and it stays that way until the owner notices.</li>
+<li><strong>Leftover inventory.</strong> Every time you re-centre, you end up holding the wrong ratio of
+tokens and have to do something with the excess.</li>
+</ol>
+
+<p><strong>Gamma</strong> is an active liquidity manager that solves all three. Its core contract, the
+<strong>Hypervisor</strong>, is an ERC-20 token that owns v3 positions on your behalf.</p>
+
+<h3>2.2 Base and limit positions</h3>
+
+<p>The Hypervisor holds <strong>two</strong> positions, not one:</p>
+
+<pre><code>       limit (narrow, one-sided)
+              ┌────┐
+              │    │
+   ┌──────────┴────┴──────────┐
+   │      base (wide, centred on price)      │
+   └─────────────────────────────────────────┘
+            ▲ current price</code></pre>
+
+<ul>
+<li><strong>Base</strong> — the wide, symmetric band that does the actual market making. Ours launches at
+&plusmn;10%.</li>
+<li><strong>Limit</strong> — a narrow, one-sided position just off spot, holding whatever inventory was
+left over after minting the base.</li>
+</ul>
+
+<p>The limit position is the clever part. After a rebalance you are typically long one token. The
+naive fix is to market-sell the excess — paying a fee and eating slippage. Instead Gamma parks it
+as a resting one-sided order just outside spot. If the market comes to it, the vault
+<strong>earns</strong> the fee instead of paying it. Re-inventorying becomes a revenue line rather than
+a cost.</p>
+
+<h3>2.3 The deposit path</h3>
+
+<pre><code>depositor
+   │  approve(Hypervisor)          ← not UniProxy. UniProxy forwards
+   │                                  from = msg.sender and the
+   ▼                                  Hypervisor calls transferFrom
+UniProxy.deposit()
+   │
+   ├──► ClearingV2.clearDeposit()   ← all the gates live here
+   │      • vault registered?
+   │      • not paused?
+   │      • current tick inside the base band?
+   │      • spot within 1% of the 1h TWAP?
+   │      • both sides non-zero, ratio sane?
+   │      • per-tx caps?
+   │
+   ├──► Hypervisor.deposit()        ← onlyWhitelisted (= UniProxy)
+   │      tokens land as IDLE VAULT BALANCE
+   │      shares minted, priced at pool spot
+   │
+   └──► ClearingV2.clearShares()    ← maxTotalSupply, checked after mint</code></pre>
+
+<div class="box key">
+<p class="t">Deposits do not go into the pool</p>
+<p>They sit at the vault as idle balance until the keeper sweeps them in. This is deliberate:
+minting straight into the pool at spot price is manipulable — shove the price, deposit against the
+distorted composition, shove it back. Gamma only deploys capital during a keeper action, which is
+itself gated against manipulation. (There <em>is</em> a <code>directDeposit</code> mode. It is off, per
+spec.)</p>
+</div>
+
+<p>The gates are why "just add liquidity" is never a one-liner. Two of them bite constantly in
+practice: the current tick must be <em>inside</em> the base band, and spot must be within 1% of the
+hour TWAP. A vault left unmanaged between setup and first deposit can drift out of its own band
+and refuse its own seed.</p>
+
+<h4>The empty-vault special case</h4>
+
+<p>On the very first deposit (<code>totalSupply() == 0</code>) the ratio check is <strong>automatically
+disabled</strong> — <code>getDepositAmount</code> returns <code>(0, deposit1Max)</code>, meaning "any proportion, up
+to the cap". Both sides still have to be non-zero. Worth knowing because a UI that auto-fills the
+second input from that call will fill it with 0 or with the cap.</p>
+
+<p>The dangerous state is not <em>empty</em>, it is <em>nearly empty</em>: if shares are outstanding but the
+vault holds zero of one token, <code>getDepositAmount</code> returns <code>(0, 0)</code> and <strong>every</strong>
+deposit reverts.</p>
+
+<h3>2.4 The guard stack</h3>
+
+<p>Gamma splits authority across four contracts so that no single compromised key is fatal.</p>
+
+<table>
+<thead><tr><th>Contract</th><th>Job</th><th>Held by</th></tr></thead>
+<tbody>
+<tr><td><code>Hypervisor</code></td><td>The ERC-20 vault. Owns the two v3 positions. Holds
+<em>no strategy</em> — its bands are whatever the last rebalance set.</td><td>owner = Admin</td></tr>
+<tr><td><code>UniProxy</code></td><td>Public entry point for deposits. Permissionless — anyone may
+deposit.</td><td>governance</td></tr>
+<tr><td><code>ClearingV2</code></td><td>Every deposit rule: TWAP guard, ratios, per-tx caps, total
+supply cap, pause switch.</td><td>governance</td></tr>
+<tr><td><code>Admin</code></td><td>Role split. <code>rebalancers[]</code> and <code>advisors[]</code> are
+<em>different</em> roles — rebalancing and compounding are separate powers.</td><td>governance</td></tr>
+<tr><td><code>RebalanceProxy</code></td><td>On-chain policy that binds even a compromised keeper:
+<code>maxTranslation</code>, <code>maxWidth</code>, <code>minInterval</code>.</td><td>governance</td></tr>
+</tbody>
+</table>
+
+<p>Our configured limits, per vault:</p>
+
+<pre><code>maxTranslation   500 ticks  (~5%)   one rebalance cannot jump the band further
+maxWidth         300 ticks           cannot change band width by more than this
+minInterval      21,600s (6h)        hard rate limit between rebalances</code></pre>
+
+<div class="box warn">
+<p class="t">The ordering trap this creates</p>
+<p>Because a single rebalance may only translate the band 500 ticks, the band must be
+<em>placed correctly at setup</em>. If the pool price is 980 ticks away from truth when the launch band
+is set, the keeper's first move exceeds the cap and reverts — and after handover, raising that cap
+requires a referendum. <strong>Fix the price before setting the band, not after.</strong></p>
+</div>
+
+<h3>2.5 Fees</h3>
+
+<p>Three separate cuts come out of the same swap fee, and they are easy to confuse:</p>
+
+<table>
+<thead><tr><th>Cut</th><th>Set where</th><th>Ours</th></tr></thead>
+<tbody>
+<tr><td>Swap fee — what the trader pays</td><td>fixed at pool creation, immutable</td><td>0.30%</td></tr>
+<tr><td>Protocol fee — v3's cut of that</td><td><code>setFeeProtocol</code>, factory owner</td><td>1/4 (<code>4,4</code>)</td></tr>
+<tr><td>Gamma fee — vault's cut of what's left</td><td>Hypervisor <code>fee</code> <em>divisor</em></td><td>255 &asymp; 0.4%</td></tr>
+</tbody>
+</table>
+
+<p>Note the Gamma fee is a <strong>divisor</strong>, so bigger number = smaller fee. The code default of 5
+means 20%; we launch at 255 to leave nearly everything with LPs. It can never be 0 — that divides
+by zero and bricks fee harvesting.</p>
+
+<hr>
+
+<h2 id="s3"><span class="n">3</span>The keeper bot</h2>
+<p class="lede">All the judgement lives off-chain. All the limits live on-chain.</p>
+
+<p>The Hypervisor stores no strategy. Deciding <em>when</em> to move the band and <em>where</em> to put it
+is the keeper's entire job. It is a small TypeScript service
+(<code>gamma-hypervisor/keeper</code>) that wakes every block.</p>
+
+<h3>3.1 The loop</h3>
+
+<pre><code>every block
+  │
+  ├─ read spot tick
+  │
+  ├─ TRIGGER?   spot outside the base band
+  │             OR drift from band centre > threshold × tickSpacing
+  │             (no → maybe compound, else sleep)
+  │
+  ├─ GATES      every one must pass, all fail CLOSED
+  │   1. pool history ≥ MIN_TWAP_WINDOW_SECS
+  │   2. |spot − pool TWAP|   ≤ MAX_DEV_TICKS         (100)
+  │   3. DIA feed age         ≤ ORACLE_MAX_AGE_SECS
+  │   4. |pool − DIA oracle|  ≤ ORACLE_MAX_DEV_TICKS  (200)
+  │   5. volatility regime not EXTREME
+  │   6. dwell / min-interval satisfied
+  │   7. keeper gas above floor
+  │
+  ├─ PLACE      new band centred on the TWAP tick, not spot
+  │
+  ├─ PREFLIGHT  callStatic the exact tx; a revert here costs nothing
+  │
+  └─ SUBMIT     keeper → RebalanceProxy → Admin → Hypervisor.rebalance()</code></pre>
+
+<h3>3.2 Trigger versus placement</h3>
+
+<p>A deliberate split, and a good one to understand:</p>
+
+<ul>
+<li><strong>Spot decides <em>whether</em> to act.</strong> It is responsive — you want to notice quickly that
+price left the band.</li>
+<li><strong>The TWAP decides <em>where</em> the new band goes.</strong> It is slow and expensive to
+manipulate.</li>
+</ul>
+
+<p>So an attacker can push spot and make the keeper wake up, but cannot drag the band to the price
+they pushed. The worst they achieve is a wasted transaction.</p>
+
+<h3>3.3 The external-truth clamp</h3>
+
+<p>Gate 4 is the important one. The pool's own TWAP can be walked over time by someone willing to
+hold a price — but they cannot move the exchanges that <strong>DIA</strong> aggregates. Requiring the pool
+to agree with the external feed within 200 ticks (~2%) makes "manipulate the pool, wait for the
+keeper" unprofitable.</p>
+
+<p>Everything fails closed. An unreadable feed, a stale feed, a TWAP that won't compute — all of
+them mean <em>skip</em>, never <em>proceed anyway</em>. The failure mode is an idle keeper, which is
+recoverable; the alternative is placing real money at a manipulated price, which is not.</p>
+
+<h3>3.4 Compounding</h3>
+
+<p>Separate job, separate clock, separate role (<code>advisors[]</code>, not <code>rebalancers[]</code>).
+<code>compound()</code> harvests accrued swap fees and re-mints them into the <em>existing</em> ticks — and
+because it re-mints the vault's whole idle balance, it is also what sweeps in new deposits.</p>
+
+<p>It runs on a timer (<code>COMPOUND_INTERVAL_SECS</code>, default 300s) but passes the same price gates.
+Short interval is intentional: an attack on a sweep scales with the size of the pile being tipped
+in, so frequent small sweeps stay below the threshold where attacking one beats the swap fee.</p>
+
+<div class="box warn">
+<p class="t">Check this flag</p>
+<p><code>COMPOUND_ENABLED</code> defaults to <strong>false</strong>. With it off there is no periodic sweep at
+all, and a deposit sits as idle vault balance until a drift-triggered rebalance happens to fire —
+which, if price is sitting mid-band, could be a long time.</p>
+</div>
+
+<h3>3.5 What the keeper cannot do</h3>
+
+<p>By design, and worth stating because people assume otherwise:</p>
+
+<ul>
+<li><strong>It cannot add liquidity.</strong> It only moves and compounds what depositors have already put
+in. An empty vault gives it nothing to do.</li>
+<li><strong>It cannot exceed the proxy caps</strong> — translation, width, interval are enforced in
+Solidity.</li>
+<li><strong>It cannot pull liquidity in an emergency.</strong> That is <code>Admin.pullLiquidity</code>, a
+governance path, not a keeper path.</li>
+<li><strong>It cannot fix a stale pool price.</strong> Only trading does that, and trading needs liquidity.</li>
+</ul>
+
+<hr>
+
+<h2 id="s4"><span class="n">4</span>The Substrate side</h2>
+<p class="lede">Hydration is not an EVM chain with a Substrate bolt-on. It is the other way round.</p>
+
+<h3>4.1 Two worlds, one chain</h3>
+
+<p>Hydration is a Substrate parachain whose native pallets (Omnipool, Stableswap, lending) are Rust
+runtime code. It <em>also</em> runs an EVM via <code>pallet-frontier</code>, which is where Uniswap v3 and Gamma
+live. The interesting engineering is at the seam.</p>
+
+<p>Assets have numeric IDs on the Substrate side (<code>aDOT = 1001</code>, <code>HOLLAR = 222</code>) and contract
+addresses on the EVM side. For <code>Erc20</code>-kind assets the runtime resolves an ID to its
+<strong>registered contract address</strong>, not to the synthetic <code>0x…01++id</code> alias.</p>
+
+<div class="box warn">
+<p class="t">This bit has bitten us</p>
+<p>A pool built from alias addresses is invisible to the runtime's <code>find_pool</code> — and for aDOT the
+alias reverts on transfer, so it could not be funded either. Anything ordering-dependent must use
+registry contract addresses.</p>
+</div>
+
+<h3>4.2 How the runtime routes through an EVM pool</h3>
+
+<p><code>UniswapV3TradeExecutor</code> (<code>runtime/hydradx/src/evm/uniswap_v3_trade_executor.rs</code>) implements
+the same <code>TradeExecution</code> trait that Omnipool and Stableswap implement. That is what lets
+<code>pallet-route-executor</code> treat a v3 pool as just another venue in a multi-hop route.</p>
+
+<p>It works by having Rust call Solidity:</p>
+
+<pre><code>quoting     QuoterV2.quoteExactInputSingle / quoteExactOutputSingle
+discovery   Factory.getPool(token0, token1, fee)
+state       Pool.slot0(), Pool.liquidity()
+execution   SwapRouter02.exactInputSingle / exactOutputSingle
+plumbing    ERC20.approve, ERC20.balanceOf</code></pre>
+
+<p>After every executed swap it reports the trade to the EMA oracle under
+<code>UNISWAPV3_SOURCE</code> — which is what lets DCA price legs that route through the v3 pool.</p>
+
+<h3>4.3 Why the pool must be registered</h3>
+
+<p>The executor reads its three addresses from <code>pallet-parameters</code> at call time:</p>
+
+<pre><code>parameters.uniswapV3Factory
+parameters.uniswapV3SwapRouter
+parameters.uniswapV3Quoter</code></pre>
+
+<p>Unset, every route through v3 errors with <em>"uniswapv3: quoter not configured"</em>. They are
+written by <code>parameters.setUniswapV3Addresses(factory, swapRouter, quoter)</code>, which is
+<code>ensure_root</code> — no configurable origin, so it is a <strong>Root-track referendum</strong>, full stop.</p>
+
+<p>Until that lands, the pool works fine for anyone calling the EVM directly, and is invisible to
+the app, the SDK router and DCA.</p>
+
+<h3>4.4 Governance identities</h3>
+
+<p>Contract calls that need privileged origins go through <code>pallet-dispatcher</code>, which dispatches an
+EVM call <em>as</em> a specific on-chain identity:</p>
+
+<table>
+<thead><tr><th>Dispatcher call</th><th>Acts as</th><th>Narrowest track</th></tr></thead>
+<tbody>
+<tr><td><code>dispatchAsTreasury</code></td><td><code>0x6d6f646c70792f7472737279…</code></td><td>5 — Treasurer</td></tr>
+<tr><td><code>dispatchAsAaveManager</code></td><td><code>0xaa7e…aa7e0</code></td><td>9 — EconomicParameters</td></tr>
+<tr><td><code>dispatchAsEmergencyAdmin</code></td><td><code>0xaa7e…aa7e1</code></td><td>TC motion</td></tr>
+</tbody>
+</table>
+
+<p>These are not interchangeable. Our v3 factory is owned by <code>0xaa7e…aa7e0</code>, so
+<code>setFeeProtocol</code> must be dispatched as the Aave manager — dispatched as anything else it
+reverts.</p>
+
+<div class="box warn">
+<p class="t">Governance calls lie about success</p>
+<p><code>dispatchAsX</code> returns <code>Ok</code> at the outer level <em>even when the inner EVM call reverted</em>, and
+<code>utility.BatchCompleted</code> fires regardless. That combination silently bricked money-market
+referendum 322. Never treat a green extrinsic as evidence — read the resulting contract state.</p>
+</div>
+
+<hr>
+
+<h2 id="s5"><span class="n">5</span>SDK and UI</h2>
+<p class="lede">Two consumers of the same pool, with different needs.</p>
+
+<h3>5.1 SDK — <code>sdk-next</code></h3>
+
+<p>The trading SDK gained a full <code>uniswapv3</code> AMM module
+(<code>packages/sdk-next/src/pool/amm/uniswapv3/</code>) so the smart order router can quote v3 alongside
+Omnipool, Stableswap and XYK. It:</p>
+
+<ul>
+<li>discovers the pool by reading the <strong>factory from chain state</strong> — no hardcoded addresses;</li>
+<li>loads the tick bitmap around the current price (a window of ~20,000 ticks each side, capped at
+12 bitmap words per side so one tight-spacing pool cannot flood the RPC);</li>
+<li>reimplements v3 swap maths in TypeScript so it can quote locally rather than paying an RPC
+round trip per candidate route;</li>
+<li>reports when the tick window was cut short, because past the loaded ticks the walk hits
+zero-liquidity sentinels and would <em>over</em>-quote.</li>
+</ul>
+
+<h3>5.2 UI</h3>
+
+<p>The vault appears on the liquidity page. It needs to handle states that no existing Gamma
+deployment has: an empty vault and an empty pool. Concretely —</p>
+
+<ul>
+<li><code>getDepositAmount</code> returns <code>(0, cap)</code> on an empty vault, so auto-filling the paired
+amount from it produces 0 or the cap. Needs a <code>totalSupply() == 0</code> branch that prices the pair
+off the pool instead.</li>
+<li>The same call <strong>reverts</strong> on a zero input — guard before calling on every keystroke.</li>
+<li><code>getTotalAmounts()</code> returns <code>(0,0)</code> and <code>totalSupply()</code> is 0, so TVL, share price and
+APR all divide by zero.</li>
+<li>A band of <code>0 / 0</code> renders as "Not started" — that is not a bug, it means the handover has
+not run.</li>
+<li><strong>Approval goes to the Hypervisor</strong>, not the UniProxy.</li>
+</ul>
+
+<hr>
+
+<h2 id="s6"><span class="n">6</span>Deployment steps</h2>
+<p class="lede">Two repos, two referenda, one strict order.</p>
+
+<h3>6.1 Phase 1 — the venue (<code>uniswap-v3-deploy/mainnet</code>)</h3>
+
+<table>
+<thead><tr><th>Step</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>00-preflight.js</code></td><td>Read-only gate: chain, key, gas, asset resolution, ordering.</td></tr>
+<tr><td><code>02-deploy.js</code></td><td>15 steps of stock Uniswap bytecode — factory, NFT descriptors,
+position manager, SwapRouter02, QuoterV2, TickLens, Migrator, Staker, Multicall2, 1bp tier.
+Resumable.</td></tr>
+<tr><td><code>03-create-pool.js</code></td><td>Creates the pool, initializes it <strong>at the oracle
+price</strong>, and grows the observation ring to 2,000 in chunks. Adds no liquidity.</td></tr>
+<tr><td><code>01-governance-calldata.js</code></td><td>Prints — never submits — the referendum preimage
+and hashes.</td></tr>
+<tr><td><code>04-verify.js</code></td><td>Read-only verification; fails on anything still unset.</td></tr>
+</tbody>
+</table>
+
+<p><strong>Referendum A (Root), before deploying:</strong> list the deploy key on
+<code>EVMAccounts::ContractDeployer</code>. Since runtime 443, contract creation is permissioned; an
+unlisted key's CREATE fails <em>and produces no EVM receipt</em>, so a naive script hangs rather than
+erroring.</p>
+
+<p><strong>Referendum B (Root), after deploying:</strong> <code>setFeeProtocol(4,4)</code> on the pool plus
+<code>parameters.setUniswapV3Addresses</code>. Cannot be built before the contracts exist, because it
+carries their addresses.</p>
+
+<h3>6.2 Phase 2 — the vault (<code>gamma-hypervisor/mainnet</code>)</h3>
+
+<table>
+<thead><tr><th>Step</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>00-preflight.js</code></td><td>Proves the configured factory really maps the pair to the
+configured pool; checks roles and guards.</td></tr>
+<tr><td><code>02-deploy.js</code></td><td>Deploys the Hypervisor (via HypervisorFactory), ClearingV2,
+UniProxy, Admin, RebalanceProxy. Wires keeper roles and caps. Leaves ownership with the deploy key —
+<strong>bootstrap posture</strong>.</td></tr>
+<tr><td><code>03-handover.js</code></td><td>Sets the launch band, whitelists UniProxy on the vault, and
+moves every owner role to governance. <strong>Nothing can deposit until this runs.</strong></td></tr>
+<tr><td><code>04-verify.js</code></td><td>Fails if any role is still held by the deploy key.</td></tr>
+<tr><td><code>10-chopsticks-rehearsal.js</code></td><td>Drives the whole flow against a local fork.
+Refuses to run against a non-local node.</td></tr>
+</tbody>
+</table>
+
+<h3>6.3 The order that matters</h3>
+
+<pre><code>1  Referendum A — whitelist the deploy key
+2  Deploy v3, create + initialize the pool at the oracle price
+3  Grow the observation ring, wait 1h of wall clock
+4  Deploy Gamma (bootstrap posture)
+5  RE-ANCHOR the pool price if it has drifted        ← before step 6
+6  03-handover.js — band, whitelist, ownership
+7  Start the keeper, confirm it can act
+8  First deposit through UniProxy
+9  Referendum B — protocol fee + router registration  ← parallel to 5-8</code></pre>
+
+<p>Step 5 before step 6 is not a preference. The handover sets the band at whatever tick the pool
+reads at that moment, and the proxy's 500-tick translation cap means a badly-placed band cannot be
+walked back without governance.</p>
+
+<div class="box">
+<p class="t">Operational rules that keep biting</p>
+<p><strong>Always pass <code>ENV_FILE</code>.</strong> Unset, it falls back to <code>mainnet/.env</code>, and the chain ID
+(222222) is identical on mainnet and on our forks — the guard cannot save you.</p>
+<p><strong>Addresses are never portable.</strong> They are nonce-derived. Nothing downstream may carry an
+address from a rehearsal or a fork.</p>
+<p><strong>Gas is pinned, not estimated.</strong> Hydration's <code>eth_estimateGas</code> under-reports; an
+underpriced transaction is dropped at apply <em>without a receipt</em>, and the script hangs on
+<code>.wait()</code> forever.</p>
+</div>
+
+<hr>
+
+<h2 id="s7"><span class="n">7</span>Where we are today</h2>
+<p class="lede">Mainnet state as read on 2026-09-09.</p>
+
+<p>Everything is deployed. Both contract sets are live and correctly wired — the ClearingV2 caps,
+the per-vault proxy limits and the entire keeper role chain are all configured to spec. The stack
+is one script away from taking deposits.</p>
+
+<table>
+<thead><tr><th></th><th>Component</th><th>State</th></tr></thead>
+<tbody>
+<tr><td><span class="tag ok">ok</span></td><td>v3 contracts + pool</td><td>live, pool at tick 185,084</td></tr>
+<tr><td><span class="tag ok">ok</span></td><td>Gamma contracts</td><td>live, wired, caps set</td></tr>
+<tr><td><span class="tag ok">ok</span></td><td>Keeper role chain</td><td>rebalancer + advisor both set</td></tr>
+<tr><td><span class="tag ok">ok</span></td><td>Observation ring</td><td><code>observe(3600)</code> succeeds</td></tr>
+<tr><td><span class="tag no">todo</span></td><td>Launch band</td><td><code>0 / 0</code> — UI shows "Not started"</td></tr>
+<tr><td><span class="tag no">todo</span></td><td>UniProxy whitelisted</td><td><code>0x0</code> — no one can deposit</td></tr>
+<tr><td><span class="tag no">todo</span></td><td>Ownership</td><td>all five roles still the deploy key</td></tr>
+<tr><td><span class="tag no">todo</span></td><td>Pool price</td><td>~9% off DIA, frozen — no liquidity to arb it</td></tr>
+<tr><td><span class="tag no">todo</span></td><td>Referendum B</td><td>not submitted; <code>feeProtocol 0</code>, router params null</td></tr>
+<tr><td><span class="tag no">todo</span></td><td>Keeper</td><td>nonce 0 — has never sent a transaction</td></tr>
+</tbody>
+</table>
+
+<p>All but the last two clear with <code>03-handover.js</code>, preceded by a price re-anchor. The
+referendum is independent — deposits and rebalancing both work without it; only native routing and
+protocol revenue wait on it.</p>
+
+<hr>
+
+<h2 id="s8"><span class="n">8</span>Reference</h2>
+
+<h3>8.1 Addresses</h3>
+
+<pre><code>Uniswap v3
+  factory          0x776c4Fd6A6170165a91bA45Dec40a14bcc8eC354
+  swapRouter02     0x5a79dE848626994c4099640EF5c48Fd65DAe4159
+  quoterV2         0x9D7c18Be9AdD2748784A3c6F9071D67CA8f29974
+  pool (0.3%)      0x5C6208A3c316A801f8996750aA7b6f45Fc988548
+
+Gamma
+  Hypervisor       0xa206D0959813f17c17C87147271C49065438648A
+  HypervisorFactory 0x1d652D8333F412c5e86360D3adc43E3F3C93E603
+  ClearingV2       0x3541A3E5Db2d611904BE4F45A3CAFEA9A4df3e48
+  UniProxy         0x20aA5d9ffF339c3f1ACaee792aa05c53cEb3F741
+  Admin            0x8fc8a0d7cb9c6B2366Ec08f1Bf03067D54b67bc5
+  RebalanceProxy   0x8B7Dd119b7edb85D9cF166129DBec5D88DC78C94
+
+Tokens & feeds
+  aDOT   (1001)    0x02639ec01313c8775Fae74F2dad1118c8A8a86dA   token0, 10 dec
+  HOLLAR (222)     0x531a654d1696ED52e7275A8cede955E82620f99a   token1, 18 dec
+  DIA DOT/USD      0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702   8 dec
+
+Identities
+  governance       0xaa7e0000000000000000000000000000000aa7e0
+  treasury         0x6d6f646c70792f74727372790000000000000000</code></pre>
+
+<h3>8.2 Launch parameters</h3>
+
+<table>
+<thead><tr><th>Item</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>Pair / fee tier</td><td>aDOT / HOLLAR, 3000 (0.30%), spacing 60</td></tr>
+<tr><td>Protocol fee</td><td><code>setFeeProtocol(4,4)</code> = 1/4</td></tr>
+<tr><td>Gamma fee divisor</td><td>255 (&asymp; 0.4%)</td></tr>
+<tr><td>Launch band</td><td>&plusmn;10% — <code>BASE_HALF_WIDTH_MULT=16</code> &times; 60 = &plusmn;960 ticks</td></tr>
+<tr><td>Observation cardinality</td><td>2,000 (floor 1,801 at 2s blocks)</td></tr>
+<tr><td>ClearingV2</td><td><code>twapInterval</code> 3600s, <code>priceThreshold</code> 10,100 (1%)</td></tr>
+<tr><td>Per-tx caps</td><td>45,842 aDOT / 50,000 HOLLAR</td></tr>
+<tr><td>Total supply cap</td><td>150,000 (&asymp; $150k)</td></tr>
+<tr><td>Proxy limits</td><td>translation 500 &middot; width 300 &middot; interval 6h</td></tr>
+<tr><td>Keeper deviation gates</td><td>spot vs TWAP 100 ticks &middot; pool vs oracle 200 ticks</td></tr>
+</tbody>
+</table>
+
+<h3>8.3 Glossary</h3>
+
+<table>
+<thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>tick</td><td>One basis point of price. <code>price = 1.0001^tick</code>.</td></tr>
+<tr><td>tick spacing</td><td>Grid that range boundaries must land on. 60 for the 0.3% tier.</td></tr>
+<tr><td>slot0</td><td>The pool's hot storage slot: current price, tick, observation state, protocol fee.</td></tr>
+<tr><td>TWAP</td><td>Time-weighted average price from the pool's observation ring.</td></tr>
+<tr><td>base / limit</td><td>Gamma's two positions — wide and centred, versus narrow and one-sided.</td></tr>
+<tr><td>ALM</td><td>Active liquidity management — deciding and moving the range.</td></tr>
+<tr><td>LVR</td><td>Loss-versus-rebalancing: what LPs lose to arbitrageurs. Scales with concentration.</td></tr>
+<tr><td>handover</td><td>The script that ends bootstrap posture and moves ownership to governance.</td></tr>
+<tr><td>bootstrap posture</td><td>Deployed but deploy-key-owned; deposits impossible.</td></tr>
+</tbody>
+</table>
+
+<p class="foot">
+Sources: <code>galacticcouncil/uniswap-v3-deploy</code> and <code>gamma-hypervisor</code> (<code>mainnet/</code>,
+<code>keeper/</code>, <code>contracts/</code>); <code>hydration-node</code> <code>feat/uniswap-v3-router</code>
+(<code>runtime/hydradx/src/evm/uniswap_v3_trade_executor.rs</code>); <code>sdk</code>
+<code>packages/sdk-next/src/pool/amm/uniswapv3/</code>; wiki notes
+<em>note-univ3-gamma-adot-hollar</em> and <em>note-gamma-adot-hollar-alm-spec</em>.
+Chain state read live from <code>rpc.hydradx.cloud</code> on 2026-09-09.
+</p>
+
+</main>
+</div>
+
+<script>
+(function(){
+  var bar = document.getElementById('bar');
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav a'));
+  var sections = links.map(function(a){ return document.getElementById(a.getAttribute('href').slice(1)); });
+
+  function onScroll(){
+    var h = document.documentElement;
+    var pct = h.scrollTop / (h.scrollHeight - h.clientHeight || 1);
+    bar.style.width = (pct * 100) + '%';
+
+    var idx = 0;
+    for (var i = 0; i < sections.length; i++){
+      if (sections[i] && sections[i].getBoundingClientRect().top <= 90) idx = i;
+    }
+    links.forEach(function(a, i){ a.classList.toggle('on', i === idx); });
+  }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+})();
+</script>
+</body>
+</html>
