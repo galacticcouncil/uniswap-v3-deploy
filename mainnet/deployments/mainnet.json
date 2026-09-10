@@ -1,0 +1,40 @@
+{
+  "network": {
+    "name": "mainnet",
+    "chainId": "222222",
+    "evmRpc": "https://rpc.hydradx.cloud",
+    "substrateWs": "wss://rpc.hydradx.cloud"
+  },
+  "deployer": "0x71FeB8b2849101a6E62e3369eaAfDc6154CD0Bc0",
+  "owner": "0xAa7e0000000000000000000000000000000Aa7e0",
+  "tokens": {
+    "weth": {
+      "assetId": 20,
+      "address": "0x0000000000000000000000000000000100000014",
+      "role": "gas"
+    },
+    "tokenA": {
+      "assetId": 1001,
+      "alias": "0x00000000000000000000000000000001000003e9"
+    },
+    "tokenB": {
+      "assetId": 222,
+      "alias": "0x00000000000000000000000000000001000000de"
+    }
+  },
+  "uniswap": {
+    "v3CoreFactory": "0x776c4Fd6A6170165a91bA45Dec40a14bcc8eC354",
+    "multicall2": "0x8B3Ea499C481438f9D1481772353F2D4DC9A6762",
+    "proxyAdmin": "0x5324457F86310af50B9084F61c992FB73AdD2Ab9",
+    "tickLens": "0x5A80D3C6a60FBa26564574654645DeAEc1F62Eae",
+    "quoterV2": "0x9D7c18Be9AdD2748784A3c6F9071D67CA8f29974",
+    "nftDescriptorLibrary": "0x5DCE5306f247984042C18c0AEc99A60E24078Bc9",
+    "nonfungibleTokenPositionDescriptor": "0xe8918cC414367936d98D17955466Ae88E80E03EF",
+    "descriptorProxy": "0x679fe5D49E7A1eC6FB02C27665969d7D730C508C",
+    "nonfungiblePositionManager": "0xd5029E471eE3F6F51feFb63Fed0482A74Bb310B3",
+    "v3Migrator": "0xa3F189CC5E16DB5d5258723584bbA36BCEb221D3",
+    "v3Staker": "0x23Ce9947b2ee7970F87e1Cea64822A057eEdb8B4",
+    "swapRouter02": "0x5a79dE848626994c4099640EF5c48Fd65DAe4159",
+    "weth9": "0x0000000000000000000000000000000100000014"
+  }
+}
