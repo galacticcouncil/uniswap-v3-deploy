@@ -1,0 +1,7 @@
+node_modules/
+chainspec-plain.json
+chainspec-raw.json
+zombienet.log
+zombienet.pid
+deployments/
+package-lock.json

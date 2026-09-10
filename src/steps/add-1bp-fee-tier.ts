@@ -5,7 +5,7 @@ import { MigrationStep } from '../migrations'
 const ONE_BP_FEE = 100
 const ONE_BP_TICK_SPACING = 1
 
-export const ADD_1BP_FEE_TIER: MigrationStep = async (state, { signer, gasPrice }) => {
+export const ADD_1BP_FEE_TIER: MigrationStep = async (state, { signer, gasPrice, gasLimit }) => {
   if (state.v3CoreFactoryAddress === undefined) {
     throw new Error('Missing UniswapV3Factory')
   }
@@ -16,7 +16,7 @@ export const ADD_1BP_FEE_TIER: MigrationStep = async (state, { signer, gasPrice 
   if (owner !== (await signer.getAddress())) {
     throw new Error('UniswapV3Factory.owner is not signer')
   }
-  const tx = await v3CoreFactory.enableFeeAmount(ONE_BP_FEE, ONE_BP_TICK_SPACING, { gasPrice })
+  const tx = await v3CoreFactory.enableFeeAmount(ONE_BP_FEE, ONE_BP_TICK_SPACING, { gasPrice, gasLimit })
 
   return [
     {

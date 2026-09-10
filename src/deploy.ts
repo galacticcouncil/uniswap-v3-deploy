@@ -39,7 +39,8 @@ const MIGRATION_STEPS: MigrationStep[] = [
 
 export default function deploy({
   signer,
-  gasPrice: numberGasPrice,
+  gasPrice,
+  gasLimit,
   initialState,
   onStateChange,
   weth9Address,
@@ -48,7 +49,8 @@ export default function deploy({
   ownerAddress,
 }: {
   signer: Signer
-  gasPrice: number | undefined
+  gasPrice: BigNumber | undefined
+  gasLimit: BigNumber | undefined
   weth9Address: string
   nativeCurrencyLabelBytes: string
   v2CoreFactoryAddress: string
@@ -56,12 +58,9 @@ export default function deploy({
   initialState: MigrationState
   onStateChange: (newState: MigrationState) => Promise<void>
 }): AsyncGenerator<StepOutput[], void, void> {
-  const gasPrice =
-    typeof numberGasPrice === 'number' ? BigNumber.from(numberGasPrice).mul(BigNumber.from(10).pow(9)) : undefined // convert to wei
-
   return migrate({
     steps: MIGRATION_STEPS,
-    config: { gasPrice, signer, weth9Address, nativeCurrencyLabelBytes, v2CoreFactoryAddress, ownerAddress },
+    config: { gasPrice, gasLimit, signer, weth9Address, nativeCurrencyLabelBytes, v2CoreFactoryAddress, ownerAddress },
     initialState,
     onStateChange,
   })

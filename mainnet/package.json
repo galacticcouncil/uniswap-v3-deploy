@@ -1,0 +1,20 @@
+{
+  "name": "uniswap-v3-hydration-launch",
+  "private": true,
+  "description": "Production launch tooling for Uniswap v3 on Hydration",
+  "scripts": {
+    "preflight": "node 00-preflight.js",
+    "governance": "node 01-governance-calldata.js",
+    "deploy": "node 02-deploy.js",
+    "pool": "node 03-create-pool.js",
+    "verify": "node 04-verify.js",
+    "all": "bash deploy-all.sh",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@polkadot/api": "^14.0.1",
+    "@polkadot/util-crypto": "^13.1.1",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.2"
+  }
+}

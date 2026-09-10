@@ -1,0 +1,18 @@
+{
+  "name": "uniswap-v3-zombienet-deploy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deploy Uniswap v3 onto a local HydraDX zombienet (Frontier EVM)",
+  "scripts": {
+    "chainspec": "node chainspec.js",
+    "setup": "node setup.js",
+    "deploy": "node deploy.js",
+    "e2e": "node e2e.js",
+    "stop": "node e2e.js stop"
+  },
+  "dependencies": {
+    "@polkadot/api": "^15.0.1",
+    "@polkadot/util": "^13.0.2",
+    "@polkadot/util-crypto": "^13.0.2"
+  }
+}
