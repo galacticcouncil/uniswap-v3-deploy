@@ -6,6 +6,7 @@
  *   node 01-governance-calldata.js ema
  *   node 01-governance-calldata.js router
  *   node 01-governance-calldata.js launch [pool]
+ *   node 01-governance-calldata.js pool [pool]     # one more pool on the live factory
  *
  * Every proposal prints on track 0 (Root). That is not a cautious default, it
  * is the only track that can carry the launch:
@@ -22,6 +23,13 @@
  * preimage hash followed by a track-1 (`whitelisted_caller`) referendum, which
  * dispatches the same call with Root. The TC is not itself an origin that can
  * make these calls.
+ *
+ * `pool` is the exception. It is for each later pool on the already-registered
+ * factory, carries only the EMA entry and the protocol fee, and so goes on track
+ * 9 (economic_parameters): `dispatcher.dispatchAsAaveManager` and
+ * `emaOracle.addOracle` both take Root | EconomicParameters.
+ * `GOVERNANCE_TRACK=root` escalates it. One pool per referendum — the scheduler's
+ * PoV limit binds a batch of EVM calls.
  */
 
 const { ethers } = require("ethers");
@@ -29,7 +37,8 @@ const { ApiPromise, WsProvider } = require("@polkadot/api");
 const { blake2AsHex } = require("@polkadot/util-crypto");
 const { env, gasOverrides, loadDeployments, resolveAssetAddress, sortTokens, ABI } = require("./lib");
 
-const ROOT = { id: 0, origin: { system: "Root" } };
+const ROOT = { id: 0, name: "root", origin: { system: "Root" } };
+const ECONOMIC_PARAMETERS = { id: 9, name: "economic_parameters", origin: { Origins: "EconomicParameters" } };
 const AAVE_MANAGER_EVM = "0xaa7e0000000000000000000000000000000aa7e0";
 const EMA_SOURCE = "0x756e697377707633"; // ASCII "uniswpv3", exactly eight bytes.
 
@@ -41,7 +50,7 @@ const feeProtocol = (value) => {
   return fee;
 };
 
-function printProposal(title, call) {
+function printProposal(title, call, track = ROOT) {
   const encoded = call.method.toHex();
   const length = (encoded.length - 2) / 2;
   console.log(`\n=== ${title} ===`);
@@ -49,9 +58,9 @@ function printProposal(title, call) {
   console.log(`  encoded:       ${encoded}`);
   console.log(`  preimage hash: ${blake2AsHex(encoded)}`);
   console.log(`  length:        ${length}`);
-  console.log(`  track:         ${ROOT.id} (root)`);
-  console.log(`  origin:        ${JSON.stringify(ROOT.origin)}`);
-  console.log("  submit:        note this preimage, submit it on track 0, and place its decision deposit.");
+  console.log(`  track:         ${track.id} (${track.name})`);
+  console.log(`  origin:        ${JSON.stringify(track.origin)}`);
+  console.log(`  submit:        note this preimage, submit it on track ${track.id}, and place its decision deposit.`);
 }
 
 async function pair(api) {
@@ -154,10 +163,61 @@ async function launchCall(api, provider, explicitPool) {
   return calls.length === 1 ? calls[0] : api.tx.utility.batchAll(calls);
 }
 
+/**
+ * A later pool is only routable if the runtime already points at THIS factory,
+ * router and quoter. `pool` never registers them, so it checks instead.
+ */
+async function assertRouterRegistered(api) {
+  if (!api.query.parameters?.uniswapV3Factory) {
+    throw new Error("runtime has no Uniswap-v3 router parameters; a new pool would be unroutable");
+  }
+  const { v3CoreFactory, swapRouter02, quoterV2 } = loadDeployments(env("NET", "mainnet")).uniswap;
+  const registered = [
+    ["uniswapV3Factory", v3CoreFactory],
+    ["uniswapV3SwapRouter", swapRouter02],
+    ["uniswapV3Quoter", quoterV2],
+  ];
+  for (const [key, want] of registered) {
+    const stored = await api.query.parameters[key]();
+    const got = stored.isSome ? stored.unwrap().toString() : "unset";
+    if (got.toLowerCase() !== want.toLowerCase()) {
+      throw new Error(`parameters.${key} is ${got}, not ${want} — enact the launch bundle first`);
+    }
+  }
+  console.log("  router registration matches the deployment record");
+}
+
+/** EMA tracking and the protocol fee for one more pool — never the router. */
+async function poolCall(api, provider, explicitPool) {
+  await assertRouterRegistered(api);
+  const calls = [];
+  const { orderedIds } = await pair(api);
+  if (!(await emaTracked(api, orderedIds))) {
+    calls.push(await emaCall(api));
+    console.log(`  + EMA-oracle tracking for assets ${orderedIds.join("/")}`);
+  }
+  const pool = explicitPool ?? (await deployedPool(api, provider));
+  const currentProtocolFee = Number((await new ethers.Contract(pool, ABI.pool, provider).slot0()).feeProtocol);
+  const wanted = feeProtocol();
+  if ((currentProtocolFee & 0x0f) !== wanted || (currentProtocolFee >> 4) !== wanted) {
+    calls.push(await feeCall(api, provider, pool, wanted));
+    console.log(`  + setFeeProtocol(${wanted}, ${wanted}) for ${pool}`);
+  }
+  if (!calls.length) return undefined;
+  return calls.length === 1 ? calls[0] : api.tx.utility.batchAll(calls);
+}
+
+function poolTrack() {
+  const choice = env("GOVERNANCE_TRACK", "economic_parameters");
+  if (choice === "economic_parameters") return ECONOMIC_PARAMETERS;
+  if (choice === "root") return ROOT;
+  throw new Error(`GOVERNANCE_TRACK must be economic_parameters or root, got ${choice}`);
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
-  if (!command || !["deployer", "fee", "ema", "router", "launch"].includes(command)) {
-    throw new Error("usage: node 01-governance-calldata.js <deployer|fee|ema|router|launch> [arguments]");
+  if (!command || !["deployer", "fee", "ema", "router", "launch", "pool"].includes(command)) {
+    throw new Error("usage: node 01-governance-calldata.js <deployer|fee|ema|router|launch|pool> [arguments]");
   }
 
   const api = await ApiPromise.create({
@@ -188,6 +248,10 @@ async function main() {
       printProposal(`track EMA oracle for assets ${ids.join("/")}`, await emaCall(api));
     } else if (command === "router") {
       printProposal("register Uniswap-v3 runtime addresses", await routerCall(api));
+    } else if (command === "pool") {
+      const call = await poolCall(api, provider, args[0]);
+      if (!call) return console.log("EMA tracking and protocol fee already match for this pool; no proposal needed.");
+      printProposal(`pool bundle ${env("POOL_NAME", "")}`.trim(), call, poolTrack());
     } else {
       const call = await launchCall(api, provider, args[0]);
       if (!call) return console.log("All governance-controlled launch state already matches the configuration.");

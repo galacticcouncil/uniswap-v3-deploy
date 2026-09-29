@@ -7,16 +7,77 @@
 const fs = require("fs");
 const path = require("path");
 
-try {
+/**
+ * The settings that describe ONE pool. With POOL_FILE set they come from that
+ * file and nowhere else, and the shared ENV_FILE may not carry any of them —
+ * so a pool can never quietly inherit another pool's token, feed or price.
+ */
+const POOL_KEYS = [
+  "POOL_NAME",
+  "TOKEN_A",
+  "TOKEN_B",
+  "FEE",
+  "EXPECT_TOKEN0",
+  "EXPECT_TOKEN1",
+  "PRICE",
+  "PRICE_FEED_A",
+  "PRICE_FEED_B",
+  "STALE_SECONDS",
+  "OBS_CARDINALITY",
+];
+
+/** Everything wrong with a POOL_FILE / ENV_FILE / shell split, as messages. */
+function poolSplitProblems(pool, shared, shell, poolKeys = POOL_KEYS) {
+  const problems = [];
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(pool.POOL_NAME || "")) {
+    problems.push("POOL_FILE must set POOL_NAME to a lowercase name like atbtc-hollar");
+  }
+  for (const key of Object.keys(pool)) {
+    if (!poolKeys.includes(key)) problems.push(`POOL_FILE sets ${key}, which is shared — move it to ENV_FILE`);
+    else if (shell[key] !== undefined && shell[key] !== pool[key]) {
+      problems.push(`${key} is also set in the shell (${shell[key]}) — unset it, the pool file is the only source`);
+    }
+  }
+  for (const key of Object.keys(shared)) {
+    if (poolKeys.includes(key)) problems.push(`ENV_FILE sets ${key}, which is per pool — move it to the pool file`);
+  }
+  return problems;
+}
+
+/**
+ * Load the launch configuration. ENV_FILE holds the shared settings and the
+ * key; POOL_FILE, when set, holds one pool's settings (see POOL_KEYS).
+ */
+function loadEnvFiles() {
   // Keep the selected launch configuration explicit. This lets an operator run
   // `ENV_FILE=.env.mainnet npm run all` without copying a production key into
   // the default .env (which is commonly a local-fork configuration).
   const envFile = process.env.ENV_FILE
     ? path.resolve(process.cwd(), process.env.ENV_FILE)
     : path.join(__dirname, ".env");
-  require("dotenv").config({ path: envFile });
-} catch {
-  /* dotenv optional — plain env vars work too */
+  const dotenv = require("dotenv");
+  if (!process.env.POOL_FILE) {
+    dotenv.config({ path: envFile });
+    return;
+  }
+  const poolFile = path.resolve(process.cwd(), process.env.POOL_FILE);
+  const pool = dotenv.parse(fs.readFileSync(poolFile));
+  const shared = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile)) : {};
+  const problems = poolSplitProblems(pool, shared, process.env);
+  if (problems.length) throw new Error(`${poolFile}:\n    ${problems.join("\n    ")}`);
+  for (const [key, value] of Object.entries({ ...shared, ...pool })) {
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+if (process.env.POOL_FILE) {
+  loadEnvFiles(); // a pool launch must fail loudly on a bad split
+} else {
+  try {
+    loadEnvFiles();
+  } catch {
+    /* dotenv optional — plain env vars work too */
+  }
 }
 
 const env = (name, def) => {
@@ -165,6 +226,15 @@ const ABI = {
     "function decimals() view returns (uint8)",
     "function description() view returns (string)",
   ],
+  // The money market's oracle, for pool tokens with no USD feed of their own.
+  aaveOracle: [
+    "function BASE_CURRENCY_UNIT() view returns (uint256)",
+    "function getAssetPrice(address) view returns (uint256)",
+    "function getSourceOfAsset(address) view returns (address)",
+  ],
+  aToken: ["function UNDERLYING_ASSET_ADDRESS() view returns (address)"],
+  // A USDOracleAdapter's DIA leg; a plain feed has no such function.
+  mmSource: ["function XToUsdOracle() view returns (address)"],
 };
 
 /**
@@ -181,6 +251,41 @@ async function readFeedE18(ethers, address, provider, staleSeconds) {
   const dec = Number(decimals);
   if (dec > 18) throw new Error(`feed ${address} has ${dec} decimals, expected <= 18`);
   return { priceE18: BigInt(answer) * 10n ** BigInt(18 - dec), age, decimals: dec };
+}
+
+/**
+ * TOKEN_A's USD price from PRICE_FEED_A, which is either an AggregatorV3 feed
+ * or the money market's AaveOracle.
+ *
+ * The AaveOracle form is for aTokens with no feed of their own (GETH, GSOL): it
+ * prices the token's underlying exactly as the money market does, and takes the
+ * age from the source's DIA leg — `XToUsdOracle()` for an adapter, the source
+ * itself for a plain feed. This mirrors the keeper (gamma-hypervisor
+ * keeper/src/chain.ts resolveFeed0), so the pool starts at the price the
+ * keeper's oracle gate will later compare it against.
+ */
+async function readPriceE18(ethers, address, provider, staleSeconds, token) {
+  const oracle = new ethers.Contract(address, ABI.aaveOracle, provider);
+  const baseUnit = await oracle.BASE_CURRENCY_UNIT().catch(() => undefined);
+  if (baseUnit === undefined) return { ...(await readFeedE18(ethers, address, provider, staleSeconds)), kind: "feed" };
+
+  const asset = await new ethers.Contract(token, ABI.aToken, provider).UNDERLYING_ASSET_ADDRESS().catch(() => {
+    throw new Error(`${address} is an AaveOracle, but pool token ${token} is not an aToken`);
+  });
+  const [price, source] = await Promise.all([oracle.getAssetPrice(asset), oracle.getSourceOfAsset(asset)]);
+  if (source === ethers.ZeroAddress) throw new Error(`AaveOracle ${address} has no source for ${asset}`);
+  if (price <= 0n) throw new Error(`AaveOracle priced ${asset} at ${price}`);
+  const leg = await new ethers.Contract(source, ABI.mmSource, provider).XToUsdOracle().catch(() => source);
+  const round = await new ethers.Contract(leg, ABI.aggregatorV3, provider).latestRoundData();
+  const age = Math.floor(Date.now() / 1000) - Number(round.updatedAt);
+  if (age > staleSeconds) throw new Error(`price leg ${leg} behind AaveOracle is stale (${age}s old)`);
+  return { priceE18: (price * 10n ** 18n) / baseUnit, age, kind: "aave", asset, source, leg };
+}
+
+/** `deployments/<net>-pool.json`, or `<net>-pool-<POOL_NAME>.json` for a pool file. */
+function poolRecordPath(net) {
+  const name = env("POOL_NAME");
+  return path.join("deployments", name ? `${net}-pool-${name}.json` : `${net}-pool.json`);
 }
 
 /**
@@ -247,9 +352,13 @@ function saveJson(rel, obj) {
 }
 
 module.exports = {
+  POOL_KEYS,
+  poolSplitProblems,
   env,
   requireEnv,
   readFeedE18,
+  readPriceE18,
+  poolRecordPath,
   assetToEvmAddress,
   resolveAssetAddress,
   sortTokens,

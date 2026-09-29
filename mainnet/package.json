@@ -9,6 +9,7 @@
     "pool": "node 03-create-pool.js",
     "verify": "node 04-verify.js",
     "all": "bash deploy-all.sh",
+    "launch-pool": "bash launch-pool.sh",
     "test": "node --test"
   },
   "dependencies": {

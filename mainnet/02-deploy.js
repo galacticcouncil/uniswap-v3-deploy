@@ -58,6 +58,11 @@ function resolveOwner(net, deployer) {
 }
 
 async function main() {
+  // Later pools live on the factory the runtime already routes through; a
+  // second factory would make them invisible to the router.
+  if (env("POOL_NAME")) {
+    throw new Error("a pool file is loaded — later pools reuse the registered v3 contracts, never redeploy them (use launch-pool.sh)");
+  }
   const net = env("NET", "mainnet");
   const rpc = env("EVM_RPC_URL", "https://rpc.hydradx.cloud");
   const pk = requireEnv("DEPLOYER_PK");

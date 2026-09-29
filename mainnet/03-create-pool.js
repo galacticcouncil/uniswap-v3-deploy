@@ -5,12 +5,16 @@
  *
  * Price resolution (TOKEN_B per 1 TOKEN_A, human units):
  *   - PRICE_FEED_A                -> TOKEN_A/USD. TOKEN_B assumed 1 USD, or set
- *     PRICE_FEED_B for a second feed and the ratio is used.
+ *     PRICE_FEED_B for a second feed and the ratio is used. PRICE_FEED_A may be
+ *     the money market's AaveOracle for an aToken with no feed (GETH, GSOL).
  *   - PRICE                       -> manual decimal, e.g. 4.2
  *   - both                        -> the feed wins, abort if they diverge more
  *     than MAX_DIVERGENCE_BPS (a wrong init price is free money for the first arber).
  *
  * Feeds use Chainlink AggregatorV3's latestRoundData interface.
+ *
+ * With POOL_FILE set, the record goes to deployments/<net>-pool-<POOL_NAME>.json,
+ * so each pool of a multi-pool launch keeps its own.
  */
 
 const { ethers } = require("ethers");
@@ -19,6 +23,8 @@ const {
   env,
   requireEnv,
   readFeedE18,
+  readPriceE18,
+  poolRecordPath,
   resolveAssetAddress,
   sortTokens,
   parsePriceToE18,
@@ -76,19 +82,19 @@ async function waitForSuccess(tx, confirmations, label) {
   return receipt;
 }
 
-async function resolvePriceE18(provider) {
+async function resolvePriceE18(provider, tokenA) {
   const manual = env("PRICE") ? parsePriceToE18(env("PRICE")) : undefined;
   let oracle;
   if (env("PRICE_FEED_A")) {
     const stale = Number(env("STALE_SECONDS", "3600"));
-    const read = async (label, address) => {
-      const r = await readFeedE18(ethers, address, provider, stale);
-      console.log(`  ${label} ${address} = ${fmtE18(r.priceE18)} USD (age ${r.age}s, ${r.decimals} dec)`);
-      return r.priceE18;
-    };
-    const a = await read("feed A", env("PRICE_FEED_A"));
+    const r = await readPriceE18(ethers, env("PRICE_FEED_A"), provider, stale, tokenA);
+    const via = r.kind === "aave" ? `AaveOracle, ${r.asset} via ${r.source}, age leg ${r.leg}` : `${r.decimals} dec`;
+    console.log(`  feed A ${env("PRICE_FEED_A")} = ${fmtE18(r.priceE18)} USD (age ${r.age}s, ${via})`);
+    const a = r.priceE18;
     if (env("PRICE_FEED_B")) {
-      const b = await read("feed B", env("PRICE_FEED_B"));
+      const rb = await readFeedE18(ethers, env("PRICE_FEED_B"), provider, stale);
+      console.log(`  feed B ${env("PRICE_FEED_B")} = ${fmtE18(rb.priceE18)} USD (age ${rb.age}s, ${rb.decimals} dec)`);
+      const b = rb.priceE18;
       // Both are 1e18 USD prices; TOKEN_B per TOKEN_A is their ratio.
       oracle = (a * 10n ** 18n) / b;
     } else {
@@ -152,7 +158,7 @@ async function main() {
   console.log(`=== Pool ${symA}(${assetA})/${symB}(${assetB}) fee ${fee} on ${net} ===`);
   console.log(`  token0 ${token0}  token1 ${token1}  (${symA} is token${aIsToken0 ? 0 : 1})`);
 
-  const priceE18 = await resolvePriceE18(provider);
+  const priceE18 = await resolvePriceE18(provider, addrA);
   console.log(`  init price: ${fmtE18(priceE18)} ${symB} per ${symA}`);
   const sqrtPriceX96 = sqrtPriceX96FromPrice(priceE18, Number(decA), Number(decB), aIsToken0);
 
@@ -268,7 +274,7 @@ async function main() {
     );
   }
 
-  const outPath = saveJson(`deployments/${net}-pool.json`, {
+  const outPath = saveJson(poolRecordPath(net), {
     chainId: (await provider.getNetwork()).chainId.toString(),
     pool,
     token0,

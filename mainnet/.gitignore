@@ -2,6 +2,7 @@
 # backups like .env.backup-dothollar and .env.lark4.
 .env*
 !.env.example
+!.env.pools.example
 node_modules/
 # Deployment records are the launch archive — the addresses are nonce-derived
 # and exist nowhere else. Keep the JSON, keep everything else out.
