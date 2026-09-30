@@ -62,8 +62,13 @@ cp .env.pools.example .env.pools                                  # set DEPLOYER
 ENV_FILE=.env.pools ./launch-pool.sh pools/atbtc-hollar.env        # preflight, create, print proposal
 # submit that proposal on track 9 (economic_parameters): one referendum per pool
 ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run verify
+# once the Gamma seed is in the pool: quote it through both routers (read-only)
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run quote
 ```
 
+- `quote` asks QuoterV2 on the EVM side and dry-runs `router.sell` over
+  `UniswapV3(FEE)` on the Substrate side (`DryRunApi`, from the treasury by
+  default, `QUOTE_FROM` to change it). Nothing is signed.
 - HOLLAR sorts first in atBTC, GETH and GSOL. `EXPECT_TOKEN0/1` pin the order
   and every price read follows the pin.
 - GETH and GSOL have no USD feed: their `PRICE_FEED_A` is the money market's
