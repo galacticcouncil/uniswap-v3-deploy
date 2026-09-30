@@ -50,6 +50,29 @@ The verifier checks contract code, ownership, the registry-resolved pool tokens,
 initialization, protocol fee, TWAP capacity, EMA tracking, all three router
 addresses, and governance-event failure markers.
 
+## Pools 2-5 on the live factory
+
+Later pools reuse the registered factory and router; nothing is redeployed.
+Each pool has its own file in `pools/`. `.env.pools` holds only the shared
+settings and the key, and the scripts refuse a split where either file carries
+the other's keys.
+
+```bash
+cp .env.pools.example .env.pools                                  # set DEPLOYER_PK
+ENV_FILE=.env.pools ./launch-pool.sh pools/atbtc-hollar.env        # preflight, create, print proposal
+# submit that proposal on track 9 (economic_parameters): one referendum per pool
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run verify
+```
+
+- HOLLAR sorts first in atBTC, GETH and GSOL. `EXPECT_TOKEN0/1` pin the order
+  and every price read follows the pin.
+- GETH and GSOL have no USD feed: their `PRICE_FEED_A` is the money market's
+  `AaveOracle`, read the way the keeper reads it.
+- The proposal carries only the EMA entry (when the pair is not already
+  tracked) and `setFeeProtocol(4, 4)`. It refuses unless the runtime router
+  already points at this factory.
+- Each pool's record is `deployments/mainnet-pool-<pool>.json`.
+
 ## Launch boundaries
 
 - **Both proposals go on track 0 (Root).** This is not caution:
