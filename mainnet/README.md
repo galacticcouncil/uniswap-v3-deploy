@@ -108,7 +108,15 @@ ENV_FILE=.env.fork npm run fee-setter
 
 # Mainnet: the deploy key must already be an allowed contract deployer.
 ENV_FILE=.env.pools npm run fee-setter                             # records uniswap.feeSetter in deployments/mainnet.json
+
+# Verify on the neckwork explorer (sourcify v2 api), from the money-market commit the artifact names.
+(cd ../../money-market/univ3-fee-setter && forge build --force --build-info && \
+  forge verify-contract <feeSetter> src/UniswapV3FeeSetter.sol:UniswapV3FeeSetter \
+    --verifier sourcify --verifier-url https://hydration-explorer.neckwork.net/api/)
 ```
+
+Live: `0x0B3f5231f26ee9b5553EeF6E6147Cd660bc6ecA3`, deployed 2026-10-01, neckwork `exact_match`.
+The factory stays with the Aave manager until the `handover` referendum enacts.
 
 - The step refuses an unlisted key before sending (an unlisted CREATE leaves no
   receipt), and refuses to deploy twice: a recorded `feeSetter` with code is a
