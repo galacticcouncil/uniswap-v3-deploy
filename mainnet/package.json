@@ -10,6 +10,7 @@
     "verify": "node 04-verify.js",
     "quote": "node 05-quote.js",
     "fee-setter": "node 06-deploy-fee-setter.js",
+    "rehearse-handover": "node fork-rehearse-handover.js",
     "all": "bash deploy-all.sh",
     "launch-pool": "bash launch-pool.sh",
     "test": "node --test"

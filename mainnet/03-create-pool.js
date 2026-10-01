@@ -258,10 +258,18 @@ async function main() {
 
   // Protocol fee. slot0 packs it as one uint8: token1 in the high nibble, token0
   // in the low one, and each is a DENOMINATOR (4 = 1/4 = the contract maximum,
-  // 0 = off). Setting it is an owner action, so it cannot happen here — but a
+  // 0 = off). Setting it is an owner action. Once UniswapV3FeeSetter owns the
+  // factory, anyone may set 4/4 through it, so it happens here; before that, a
   // pool that reaches launch still sitting at 0 is the failure we care about.
-  const final = await poolC.slot0();
+  let final = await poolC.slot0();
   const fpWant = Number(env("FEE_PROTOCOL", "4"));
+  const feeSetter = d.uniswap.feeSetter;
+  const isWanted = (s) => (Number(s.feeProtocol) & 0x0f) === fpWant && Number(s.feeProtocol) >> 4 === fpWant;
+  if (!isWanted(final) && fpWant === 4 && feeSetter && (await factory.owner()).toLowerCase() === feeSetter.toLowerCase()) {
+    const setter = new ethers.Contract(feeSetter, ABI.feeSetter, wallet);
+    await waitForSuccess(await setter.setFee(pool, await gasOverrides(provider)), confirmations, "feeSetter.setFee");
+    final = await poolC.slot0();
+  }
   const fp0 = Number(final.feeProtocol) & 0x0f;
   const fp1 = Number(final.feeProtocol) >> 4;
   const fpDesc = (n) => (n ? `1/${n}` : "OFF");
@@ -270,7 +278,9 @@ async function main() {
   } else {
     console.log(
         `  ! protocol fee is ${fpDesc(fp0)} / ${fpDesc(fp1)}, expected ${fpDesc(fpWant)} on both —` +
-        ` include it in: node 01-governance-calldata.js launch ${pool}`
+        (feeSetter
+          ? " the fee-setter handover sets it: node 01-governance-calldata.js handover-ice"
+          : ` include it in: node 01-governance-calldata.js launch ${pool}`)
     );
   }
 

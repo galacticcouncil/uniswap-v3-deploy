@@ -5,8 +5,11 @@
  *   node 04-verify.js events <first-block> [count]
  */
 
+const fs = require("fs");
+const path = require("path");
 const { ethers } = require("ethers");
 const { ApiPromise, WsProvider } = require("@polkadot/api");
+const { icePending, iceRouting } = require("./fee-setter-calls");
 const {
   env,
   loadDeployments,
@@ -87,7 +90,20 @@ async function verify(api) {
   const factory = new ethers.Contract(deployment.uniswap.v3CoreFactory, ABI.factory, provider);
   const expectedOwner = env("OWNER_ADDRESS", deployment.owner);
   console.log("\n--- governance ownership ---");
-  equalAddress("factory.owner()", await factory.owner(), expectedOwner);
+  const feeSetter = deployment.uniswap.feeSetter;
+  if (feeSetter) {
+    // After the fee-setter handover the factory belongs to the setter, which only the manager can steer.
+    equalAddress("factory.owner()", await factory.owner(), feeSetter);
+    const artifact = JSON.parse(fs.readFileSync(path.join(__dirname, "artifacts", "UniswapV3FeeSetter.json"), "utf8"));
+    (await provider.getCode(feeSetter)) === artifact.deployedBytecode
+      ? pass("feeSetter code matches the committed build")
+      : fail(`feeSetter code is not ${artifact.source}`);
+    const setter = new ethers.Contract(feeSetter, ABI.feeSetter, provider);
+    equalAddress("feeSetter.MANAGER()", await setter.MANAGER(), expectedOwner);
+    equalAddress("feeSetter.FACTORY()", await setter.FACTORY(), deployment.uniswap.v3CoreFactory);
+  } else {
+    equalAddress("factory.owner()", await factory.owner(), expectedOwner);
+  }
   const proxyAdmin = new ethers.Contract(deployment.uniswap.proxyAdmin, ["function owner() view returns (address)"], provider);
   equalAddress("proxyAdmin.owner()", await proxyAdmin.owner(), expectedOwner);
 
@@ -167,6 +183,13 @@ async function verify(api) {
 
   console.log("\n--- runtime integration ---");
   (await emaTracked(api, ids)) ? pass("EMA oracle tracks the pair") : fail("EMA oracle does not track the pair");
+  if (api.query.ice?.solverRouting) {
+    const { add, excluded } = icePending([poolAddress], await iceRouting(api));
+    if (excluded.length) fail("ICE routing excludes the pool");
+    else add.length ? fail("ICE routing does not include the pool") : pass("ICE routing includes the pool");
+  } else {
+    note("runtime has no ICE routing");
+  }
   // All three addresses are set by one call and all three are load-bearing:
   // the executor resolves pools through the factory, prices through the quoter
   // and swaps through the swap router. A wrong address is silent — `getPool`
