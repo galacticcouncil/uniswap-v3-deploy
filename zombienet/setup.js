@@ -2,6 +2,8 @@
  * setup.js  —  one-time on-chain setup so the EVM can charge gas in WETH (asset 20):
  *   1. set WETH's XCM location  -> WethAssetId resolves to asset 20
  *   2. add WETH as an accepted fee currency -> EVM fee withdrawal works
+ *   3. allowlist the deployer in EVMAccounts::ContractDeployer, when the entry
+ *      chainspec.js injects did not take (it does not on runtime 447)
  *
  * Batched into a single GeneralAdmin referendum that passes in ~1 block thanks to
  * Parameters::IsTestnet=true. After this the deployer's funded WETH becomes visible
@@ -49,9 +51,14 @@ async function setup() {
     const alice = new Keyring({ type: "sr25519" }).addFromUri("//Alice");
     const aliceFree = (await api.query.system.account(alice.address)).data.free.toBigInt();
 
-    const pre = await api.rpc.eth.getBalance(DEPLOYER_EVM).catch(() => null);
-    if (pre && BigInt(pre.toString()) > 0n) {
-      console.log(`  Already set up. EVM WETH balance: ${pre.toHex()}`);
+    // The EVM balance alone proves neither: on runtime 447 eth_getBalance shows
+    // the genesis WETH before WETH is a fee currency, and every EVM transaction
+    // then sits in the pool unapplied. Check both gates, enact only what is missing.
+    const feeReady = (await api.query.multiTransactionPayment.acceptedCurrencies(20)).isSome;
+    const deployerListed =
+      !api.query.evmAccounts?.contractDeployer || (await api.query.evmAccounts.contractDeployer(DEPLOYER_EVM)).isSome;
+    if (feeReady && deployerListed) {
+      console.log("  Already set up: WETH is a fee currency and the deployer is allowlisted.");
       return;
     }
 
@@ -66,10 +73,15 @@ async function setup() {
         ],
       },
     };
-    const batch = api.tx.utility.batchAll([
-      api.tx.assetRegistry.update(20, null, null, null, null, null, null, null, wethLocation),
-      api.tx.multiTransactionPayment.addCurrency(20, "1000000000000000000"), // Price::from(1)
-    ]);
+    const calls = [];
+    if (!feeReady) {
+      calls.push(
+        api.tx.assetRegistry.update(20, null, null, null, null, null, null, null, wethLocation),
+        api.tx.multiTransactionPayment.addCurrency(20, "1000000000000000000") // Price::from(1)
+      );
+    }
+    if (!deployerListed) calls.push(api.tx.evmAccounts.addContractDeployer(DEPLOYER_EVM));
+    const batch = api.tx.utility.batchAll(calls);
     const encoded = batch.method.toHex();
     const hash = blake2AsHex(encoded);
 

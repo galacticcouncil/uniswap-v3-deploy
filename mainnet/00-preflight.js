@@ -10,6 +10,7 @@ const {
   requireEnv,
   parsePriceToE18,
   readFeedE18,
+  readPriceE18,
   assetToEvmAddress,
   resolveAssetAddress,
   ABI,
@@ -78,7 +79,7 @@ async function checkAssetPair(api, provider) {
   }
 }
 
-async function checkPrice(provider) {
+async function checkPrice(provider, tokenA) {
   const staleSeconds = numberIn("STALE_SECONDS", 1, 7 * 24 * 60 * 60);
   const manual = env("PRICE");
   if (manual) {
@@ -103,11 +104,16 @@ async function checkPrice(provider) {
       continue;
     }
     try {
-      const feed = new ethers.Contract(address, ABI.aggregatorV3, provider);
-      const [description, reading] = await Promise.all([feed.description(), readFeedE18(ethers, address, provider, staleSeconds)]);
-      pass(`${key} ${description}: ${ethers.formatUnits(reading.priceE18, 18)} USD (age ${reading.age}s)`);
+      // Only TOKEN_A's feed may be the money market's AaveOracle (GETH, GSOL).
+      const reading = key === "PRICE_FEED_A"
+        ? await readPriceE18(ethers, address, provider, staleSeconds, tokenA)
+        : await readFeedE18(ethers, address, provider, staleSeconds);
+      const what = reading.kind === "aave"
+        ? `AaveOracle price of ${reading.asset} (age leg ${reading.leg})`
+        : await new ethers.Contract(address, ABI.aggregatorV3, provider).description();
+      pass(`${key} ${what}: ${ethers.formatUnits(reading.priceE18, 18)} USD (age ${reading.age}s)`);
     } catch (error) {
-      fail(`${key} cannot supply a fresh AggregatorV3 reading: ${error.message}`);
+      fail(`${key} cannot supply a fresh price: ${error.message}`);
     }
   }
 }
@@ -174,13 +180,13 @@ async function main() {
       : fail(`OBS_CARDINALITY=${cardinality} is below ${minimum}, the minimum for a ${twap}s window`);
   }
 
-  await checkPrice(provider);
-
   const api = await ApiPromise.create({ provider: new WsProvider(wsUrl), noInitWarn: true });
   try {
     pass(`Substrate WS ${wsUrl}: ${await api.rpc.system.chain()} spec ${api.runtimeVersion.specVersion}`);
     await checkDeployerWhitelist(api, deployer.address);
     await checkAssetPair(api, provider);
+    const tokenA = await resolveAssetAddress(api, Number(env("TOKEN_A", "1001"))).catch(() => undefined);
+    await checkPrice(provider, tokenA);
     if (!api.tx.parameters?.setUniswapV3Addresses) {
       note("runtime has no parameters.setUniswapV3Addresses; router registration will be skipped");
     } else {

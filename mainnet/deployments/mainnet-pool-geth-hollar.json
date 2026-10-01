@@ -1,0 +1,18 @@
+{
+  "chainId": "222222",
+  "pool": "0x9E30d2429028A436D48d0e83aC806Dcd67EF4cA7",
+  "token0": "0x531a654d1696ED52e7275A8cede955E82620f99a",
+  "token1": "0x8a598fE3E3A471ce865332E330d303502a0e2F52",
+  "assetIds": [
+    420,
+    222
+  ],
+  "fee": 3000,
+  "tick": -79149,
+  "sqrtPriceX96": "1514508529286601431597784535",
+  "observationCardinalityNext": 2000,
+  "feeProtocol": [
+    0,
+    0
+  ]
+}

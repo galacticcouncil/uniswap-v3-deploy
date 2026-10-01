@@ -13,6 +13,7 @@ const {
   resolveAssetAddress,
   sortTokens,
   readFeedE18,
+  readPriceE18,
   priceE18FromSqrtPriceX96,
   fmtE18,
   ABI,
@@ -148,7 +149,7 @@ async function verify(api) {
   pass(`pool price ${fmtE18(currentPrice)} TOKEN_B per TOKEN_A`);
   if (env("PRICE_FEED_A")) {
     try {
-      const a = await readFeedE18(ethers, env("PRICE_FEED_A"), provider, Number(env("STALE_SECONDS", "28800")));
+      const a = await readPriceE18(ethers, env("PRICE_FEED_A"), provider, Number(env("STALE_SECONDS", "28800")), addressA);
       const b = env("PRICE_FEED_B")
         ? await readFeedE18(ethers, env("PRICE_FEED_B"), provider, Number(env("STALE_SECONDS", "28800")))
         : { priceE18: 10n ** 18n };
