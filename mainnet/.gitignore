@@ -8,3 +8,5 @@ node_modules/
 # and exist nowhere else. Keep the JSON, keep everything else out.
 deployments/*
 !deployments/*.json
+# A chopsticks rehearsal writes its own record; never commit it.
+deployments/fork*.json

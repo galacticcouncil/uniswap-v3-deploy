@@ -78,6 +78,41 @@ ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run quote
   already points at this factory.
 - Each pool's record is `deployments/mainnet-pool-<pool>.json`.
 
+## The fee setter (money-market #67)
+
+`UniswapV3FeeSetter` is to become `factory.owner()`, so any new pool can be
+switched to `setFeeProtocol(4, 4)` by anyone, without a referendum. Collecting
+fees and moving ownership stay with the Aave manager. Source and tests live in
+money-market `univ3-fee-setter/`; this repo deploys the committed build in
+`artifacts/UniswapV3FeeSetter.json`, which names the commit it came from.
+
+```bash
+# After a contract change: rebuild in money-market (checked out next to this repo), then refresh the artifact.
+(cd ../../money-market/univ3-fee-setter && forge build --force)
+jq --arg src "galacticcouncil/money-market@$(git -C ../../money-market rev-parse HEAD):univ3-fee-setter/src/UniswapV3FeeSetter.sol" \
+  '{source: $src, compiler: "solc \(.metadata.compiler.version), evm \(.metadata.settings.evmVersion), optimizer on, \(.metadata.settings.optimizer.runs) runs", abi, bytecode: .bytecode.object, deployedBytecode: .deployedBytecode.object}' \
+  ../../money-market/univ3-fee-setter/out/UniswapV3FeeSetter.sol/UniswapV3FeeSetter.json > artifacts/UniswapV3FeeSetter.json
+
+# Rehearse on a chopsticks fork (setup in gamma-hypervisor/mainnet/README.md) with a FRESH key.
+# .env.fork: NET=fork, WS_URL=ws://localhost:8001, EVM_RPC_URL=http://localhost:8001, CONFIRMATIONS=1, DEPLOYER_PK=<fresh>
+(cd ../../gamma-hypervisor/mainnet && ENV_FILE=$OLDPWD/.env.fork node 10-chopsticks-rehearsal.js govern)  # fork only: gas + allowlist
+cp deployments/mainnet.json deployments/fork.json                  # ignored by git
+ENV_FILE=.env.fork npm run fee-setter
+
+# Mainnet: the deploy key must already be an allowed contract deployer.
+ENV_FILE=.env.pools npm run fee-setter                             # records uniswap.feeSetter in deployments/mainnet.json
+```
+
+- The step refuses an unlisted key before sending (an unlisted CREATE leaves no
+  receipt), and refuses to deploy twice: a recorded `feeSetter` with code is a
+  no-op, one without code is an error.
+- After deploying it requires the code to equal the artifact's runtime bytecode
+  exactly, `FACTORY()` to be the recorded factory, `MANAGER()` the recorded
+  owner, and `FEE_PROTOCOL()` 4. Only then is the address written.
+- Building a block on a fresh chopsticks fork takes about two minutes; the
+  `govern` step's 60 s RPC timeout can fire while the block still lands. Check
+  `evmAccounts.contractDeployer(<key>)` before assuming it failed.
+
 ## Launch boundaries
 
 - **Both proposals go on track 0 (Root).** This is not caution:
