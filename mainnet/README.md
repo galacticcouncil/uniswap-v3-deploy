@@ -81,8 +81,14 @@ ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run quote
 ## The fee setter (money-market #67)
 
 `UniswapV3FeeSetter` is to become `factory.owner()`, so any new pool can be
-switched to `setFeeProtocol(4, 4)` by anyone, without a referendum. Collecting
-fees and moving ownership stay with the Aave manager. Source and tests live in
+switched to `setFeeProtocol(4, 4)` by anyone, without a referendum. Anyone can
+also call `collectToTreasury(pool)`, which sends all of a pool's protocol fees
+to the treasury (`0x6d6f…0000`, the identity `dispatchAsTreasury` acts as).
+Collecting to any other address and moving ownership stay with the Aave
+manager. Send `collectToTreasury` with a generous gas limit: on a mainnet fork
+pool 1 (aDOT, an aToken) ran out at 500,000 although it reports ~154k used —
+Hydration also budgets proof size from the gas limit — and succeeded at the
+scripts' `EVM_GAS_LIMIT` of 15,000,000. Source and tests live in
 money-market `univ3-fee-setter/`; this repo deploys the committed build in
 `artifacts/UniswapV3FeeSetter.json`, which names the commit it came from.
 
