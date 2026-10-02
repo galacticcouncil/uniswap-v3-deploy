@@ -7,6 +7,9 @@
  *   node 01-governance-calldata.js router
  *   node 01-governance-calldata.js launch [pool]
  *   node 01-governance-calldata.js pool [pool]     # one more pool on the live factory
+ *   node 01-governance-calldata.js handover        # factory -> fee setter, pools to 4/4 (track 9)
+ *   node 01-governance-calldata.js ice             # pools into ICE routing (Technical Committee motion)
+ *   node 01-governance-calldata.js handover-ice    # both in one referendum (track 0)
  *
  * Every proposal prints on track 0 (Root). That is not a cautious default, it
  * is the only track that can carry the launch:
@@ -30,16 +33,29 @@
  * `emaOracle.addOracle` both take Root | EconomicParameters.
  * `GOVERNANCE_TRACK=root` escalates it. One pool per referendum — the scheduler's
  * PoV limit binds a batch of EVM calls.
+ *
+ * The fee-setter commands (money-market #67; calls in fee-setter-calls.js) take
+ * their pools from the deployment records. `handover` dispatches as the Aave
+ * manager, so it goes on track 9. `ice.updateRouting` only accepts Root or a
+ * Technical Committee majority, so `ice` alone is a TC motion and `handover-ice`,
+ * which needs both, goes on Root.
  */
 
 const { ethers } = require("ethers");
 const { ApiPromise, WsProvider } = require("@polkadot/api");
 const { blake2AsHex } = require("@polkadot/util-crypto");
 const { env, gasOverrides, loadDeployments, resolveAssetAddress, sortTokens, ABI } = require("./lib");
+const {
+  AAVE_MANAGER_EVM,
+  handoverCalls,
+  iceCall,
+  handoverIceCall,
+  printSubmission,
+  printMotion,
+} = require("./fee-setter-calls");
 
 const ROOT = { id: 0, name: "root", origin: { system: "Root" } };
 const ECONOMIC_PARAMETERS = { id: 9, name: "economic_parameters", origin: { Origins: "EconomicParameters" } };
-const AAVE_MANAGER_EVM = "0xaa7e0000000000000000000000000000000aa7e0";
 const EMA_SOURCE = "0x756e697377707633"; // ASCII "uniswpv3", exactly eight bytes.
 
 const feeProtocol = (value) => {
@@ -103,8 +119,19 @@ async function deployerCall(api, address) {
   return api.tx.evmAccounts.addContractDeployer(ethers.getAddress(address));
 }
 
+// After the fee-setter handover the factory is not the Aave manager's, so a direct
+// setFeeProtocol from it would revert inside an evm.call that still reports Ok.
+async function managerOwnsFactory(provider) {
+  const { v3CoreFactory } = loadDeployments(env("NET", "mainnet")).uniswap;
+  const owner = await new ethers.Contract(v3CoreFactory, ABI.factory, provider).owner();
+  return owner.toLowerCase() === AAVE_MANAGER_EVM;
+}
+
 async function feeCall(api, provider, pool, value) {
   if (!ethers.isAddress(pool)) throw new Error(`not a pool address: ${pool}`);
+  if (!(await managerOwnsFactory(provider))) {
+    throw new Error("the Aave manager no longer owns the factory; set the fee with feeSetter.setFee(pool) instead");
+  }
   const onChainManager = await api.query.dispatcher.aaveManagerAccount();
   const managerEvm = "0x" + Buffer.from(onChainManager.toU8a().slice(0, 20)).toString("hex");
   if (managerEvm.toLowerCase() !== AAVE_MANAGER_EVM) {
@@ -200,12 +227,18 @@ async function poolCall(api, provider, explicitPool) {
   const currentProtocolFee = Number((await new ethers.Contract(pool, ABI.pool, provider).slot0()).feeProtocol);
   const wanted = feeProtocol();
   if ((currentProtocolFee & 0x0f) !== wanted || (currentProtocolFee >> 4) !== wanted) {
-    calls.push(await feeCall(api, provider, pool, wanted));
-    console.log(`  + setFeeProtocol(${wanted}, ${wanted}) for ${pool}`);
+    if (await managerOwnsFactory(provider)) {
+      calls.push(await feeCall(api, provider, pool, wanted));
+      console.log(`  + setFeeProtocol(${wanted}, ${wanted}) for ${pool}`);
+    } else {
+      console.log("  = protocol fee left out: the fee setter owns the factory, and 03-create-pool.js sets 4/4 through it");
+    }
   }
   if (!calls.length) return undefined;
   return calls.length === 1 ? calls[0] : api.tx.utility.batchAll(calls);
 }
+
+const batched = (api, calls) => (calls.length === 1 ? calls[0] : api.tx.utility.batchAll(calls));
 
 function poolTrack() {
   const choice = env("GOVERNANCE_TRACK", "economic_parameters");
@@ -216,8 +249,9 @@ function poolTrack() {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
-  if (!command || !["deployer", "fee", "ema", "router", "launch", "pool"].includes(command)) {
-    throw new Error("usage: node 01-governance-calldata.js <deployer|fee|ema|router|launch|pool> [arguments]");
+  const commands = ["deployer", "fee", "ema", "router", "launch", "pool", "handover", "ice", "handover-ice"];
+  if (!command || !commands.includes(command)) {
+    throw new Error(`usage: node 01-governance-calldata.js <${commands.join("|")}> [arguments]`);
   }
 
   const api = await ApiPromise.create({
@@ -252,6 +286,19 @@ async function main() {
       const call = await poolCall(api, provider, args[0]);
       if (!call) return console.log("EMA tracking and protocol fee already match for this pool; no proposal needed.");
       printProposal(`pool bundle ${env("POOL_NAME", "")}`.trim(), call, poolTrack());
+    } else if (command === "handover") {
+      const calls = await handoverCalls(api, provider);
+      if (!calls.length) return console.log("The setter owns the factory and every recorded pool is at 4/4; no proposal needed.");
+      printProposal("hand the factory to the fee setter", batched(api, calls), ECONOMIC_PARAMETERS);
+    } else if (command === "ice") {
+      const call = await iceCall(api);
+      if (!call) return console.log("ICE already routes through every recorded pool; no motion needed.");
+      await printMotion(api, "add the pools to ICE routing", call);
+    } else if (command === "handover-ice") {
+      const call = await handoverIceCall(api, provider);
+      if (!call) return console.log("Handover and ICE routing are both done; no proposal needed.");
+      printProposal("fee setter handover + ICE routing", call, ROOT);
+      await printSubmission(api, call);
     } else {
       const call = await launchCall(api, provider, args[0]);
       if (!call) return console.log("All governance-controlled launch state already matches the configuration.");

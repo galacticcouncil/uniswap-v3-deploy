@@ -233,6 +233,12 @@ const ABI = {
     "function getSourceOfAsset(address) view returns (address)",
   ],
   aToken: ["function UNDERLYING_ASSET_ADDRESS() view returns (address)"],
+  // money-market univ3-fee-setter: the factory owner after the handover.
+  feeSetter: [
+    "function setFee(address)",
+    "function FACTORY() view returns (address)",
+    "function MANAGER() view returns (address)",
+  ],
   // A USDOracleAdapter's DIA leg; a plain feed has no such function.
   mmSource: ["function XToUsdOracle() view returns (address)"],
 };

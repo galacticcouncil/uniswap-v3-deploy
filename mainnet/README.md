@@ -78,6 +78,88 @@ ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run quote
   already points at this factory.
 - Each pool's record is `deployments/mainnet-pool-<pool>.json`.
 
+## The fee setter (money-market #67)
+
+`UniswapV3FeeSetter` is to become `factory.owner()`, so any new pool can be
+switched to `setFeeProtocol(4, 4)` by anyone, without a referendum. Anyone can
+also call `collectToTreasury(pool)`, which sends all of a pool's protocol fees
+to the treasury (`0x6d6f…0000`, the identity `dispatchAsTreasury` acts as).
+Collecting to any other address and moving ownership stay with the Aave
+manager. Send `collectToTreasury` with a generous gas limit: on a mainnet fork
+pool 1 (aDOT, an aToken) ran out at 500,000 although it reports ~154k used —
+Hydration also budgets proof size from the gas limit — and succeeded at the
+scripts' `EVM_GAS_LIMIT` of 15,000,000. Source and tests live in
+money-market `univ3-fee-setter/`; this repo deploys the committed build in
+`artifacts/UniswapV3FeeSetter.json`, which names the commit it came from.
+
+```bash
+# After a contract change: rebuild in money-market (checked out next to this repo), then refresh the artifact.
+(cd ../../money-market/univ3-fee-setter && forge build --force)
+jq --arg src "galacticcouncil/money-market@$(git -C ../../money-market rev-parse HEAD):univ3-fee-setter/src/UniswapV3FeeSetter.sol" \
+  '{source: $src, compiler: "solc \(.metadata.compiler.version), evm \(.metadata.settings.evmVersion), optimizer on, \(.metadata.settings.optimizer.runs) runs", abi, bytecode: .bytecode.object, deployedBytecode: .deployedBytecode.object}' \
+  ../../money-market/univ3-fee-setter/out/UniswapV3FeeSetter.sol/UniswapV3FeeSetter.json > artifacts/UniswapV3FeeSetter.json
+
+# Rehearse on a chopsticks fork (setup in gamma-hypervisor/mainnet/README.md) with a FRESH key.
+# .env.fork: NET=fork, WS_URL=ws://localhost:8001, EVM_RPC_URL=http://localhost:8001, CONFIRMATIONS=1, DEPLOYER_PK=<fresh>
+(cd ../../gamma-hypervisor/mainnet && ENV_FILE=$OLDPWD/.env.fork node 10-chopsticks-rehearsal.js govern)  # fork only: gas + allowlist
+cp deployments/mainnet.json deployments/fork.json                  # ignored by git, like the pool copies
+for f in deployments/mainnet-pool*.json; do cp "$f" "deployments/fork${f#deployments/mainnet}"; done
+ENV_FILE=.env.fork npm run fee-setter
+
+# Mainnet: the deploy key must already be an allowed contract deployer.
+ENV_FILE=.env.pools npm run fee-setter                             # records uniswap.feeSetter in deployments/mainnet.json
+
+# Verify on the neckwork explorer (sourcify v2 api), from the money-market commit the artifact names.
+(cd ../../money-market/univ3-fee-setter && forge build --force --build-info && \
+  forge verify-contract <feeSetter> src/UniswapV3FeeSetter.sol:UniswapV3FeeSetter \
+    --verifier sourcify --verifier-url https://hydration-explorer.neckwork.net/api/)
+```
+
+Live: `0x0B3f5231f26ee9b5553EeF6E6147Cd660bc6ecA3`, deployed 2026-10-01, neckwork `exact_match`.
+The factory stays with the Aave manager until the `handover` referendum enacts.
+
+- The step refuses an unlisted key before sending (an unlisted CREATE leaves no
+  receipt), and refuses to deploy twice: a recorded `feeSetter` with code is a
+  no-op, one without code is an error.
+- After deploying it requires the code to equal the artifact's runtime bytecode
+  exactly, `FACTORY()` to be the recorded factory, `MANAGER()` the recorded
+  owner, and `FEE_PROTOCOL()` 4. Only then is the address written.
+
+Once the setter is recorded, the governance step. Pools come from the
+committed `deployments/<net>-pool*.json` records; each command prints only
+what is still missing, and nothing at all when everything is done.
+
+```bash
+ENV_FILE=.env.pools npm run governance -- handover       # track 9: factory.setOwner(setter), then setFee per pool below 4/4
+ENV_FILE=.env.pools npm run governance -- ice            # TC motion: the pools ICE does not route yet, as one UniswapV3Pools batch
+ENV_FILE=.env.pools npm run governance -- handover-ice   # both in one referendum, track 0
+```
+
+- **The launch referendum is `handover-ice`**: one Root proposal that hands the
+  factory to the setter, sets 4/4 on every recorded pool through it, and adds
+  every recorded pool to ICE. It also prints the three extrinsics to submit it
+  (`preimage.notePreimage`, `referenda.submit`, `referenda.placeDecisionDeposit`)
+  with polkadot.js links. The preimage carries the gas price read when it was
+  printed (×`GAS_PRICE_MULT` headroom), so print it shortly before submitting
+  and submit those bytes, not a rebuild.
+- `handover` dispatches as the Aave manager (Root or EconomicParameters).
+  `ice.updateRouting` accepts only Root or a Technical Committee majority, so
+  `ice` alone is a motion and the combined one must be Root.
+- Rehearse it first on a chopsticks fork (after `npm run fee-setter` there):
+  `ENV_FILE=.env.fork npm run rehearse-handover` enacts the exact call with Root
+  and checks the owner, 4/4 on every recorded pool, and ICE routing.
+- After the handover: `03-create-pool.js` sets 4/4 itself through the setter;
+  `governance -- pool` leaves the fee out, and `governance -- fee` refuses,
+  because a direct `setFeeProtocol` from the Aave manager would revert inside an
+  `evm.call` that still reports Ok. `verify` expects the setter as the factory
+  owner and checks ICE routing per pool.
+- `setOwner` comes first in the batch: `setFee` only works once the setter owns
+  the factory. Each `evm.call` gets a 200,000 gas limit to keep the batch's
+  reserved proof size small.
+- Building a block on a fresh chopsticks fork takes about two minutes; the
+  `govern` step's 60 s RPC timeout can fire while the block still lands. Check
+  `evmAccounts.contractDeployer(<key>)` before assuming it failed.
+
 ## Launch boundaries
 
 - **Both proposals go on track 0 (Root).** This is not caution:
